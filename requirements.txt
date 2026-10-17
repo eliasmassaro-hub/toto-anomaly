@@ -9,3 +9,5 @@ pandas
 matplotlib
 # lightning 2.3.3 (dépendance de toto-ts) importe pkg_resources, retiré de setuptools 81+
 setuptools<81
+# toto-ts impose numpy 1.26.4, or pyarrow 26+ exige numpy 2 (sinon `import datasets` échoue)
+pyarrow<26
