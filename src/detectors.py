@@ -30,3 +30,9 @@ class BaselineDetector:
         low = np.full(HORIZON, median - self.k * scale)
         high = np.full(HORIZON, median + self.k * scale)
         return low, high
+
+
+def find_anomalies(future, low, high):
+    """Positions des points de future hors de [low, high]."""
+    future = np.asarray(future)
+    return np.flatnonzero((future < low) | (future > high))
