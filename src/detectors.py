@@ -5,6 +5,10 @@ Un point du futur hors de [low, high] est une anomalie (voir find_anomalies).
 """
 
 import numpy as np
+import torch
+from toto.data.util.dataset import MaskedTimeseries
+from toto.inference.forecaster import TotoForecaster
+from toto.model.toto import Toto
 
 from data import HORIZON
 
@@ -36,3 +40,79 @@ def find_anomalies(future, low, high):
     """Positions des points de future hors de [low, high]."""
     future = np.asarray(future)
     return np.flatnonzero((future < low) | (future > high))
+
+
+class TotoDetector:
+    """Intervalle de Toto : quantiles 0,005 et 0,995 de num_samples trajectoires prévues."""
+
+    MODEL_ID = "Datadog/Toto-Open-Base-1.0"
+    LOW_Q, HIGH_Q = 0.005, 0.995
+
+    def __init__(self, num_samples=256, max_samples_per_call=512, device=None):
+        self.num_samples = num_samples
+        # Chaque série est dupliquée num_samples fois dans le batch du modèle : on limite le
+        # nombre de séries × échantillons par appel pour borner la mémoire. Sur CPU (16 Go),
+        # 512 utilise ~5 Go ; à 4096 la machine swappe et l'appel devient 10 fois plus lent.
+        # Sur GPU, on peut augmenter cette valeur.
+        self.max_samples_per_call = max_samples_per_call
+        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        # Chargement unique du modèle (téléchargé depuis Hugging Face au premier lancement)
+        toto = Toto.from_pretrained(self.MODEL_ID).to(self.device)
+        toto.eval()
+        self.forecaster = TotoForecaster(toto.model)
+
+    def predict_interval(self, history):
+        low, high = self.predict_interval_batch([history])
+        return low[0], high[0]
+
+    def predict_interval_batch(self, histories):
+        """Intervalles de plusieurs séries de même longueur ; renvoie low et high de forme (n, HORIZON).
+
+        Un seul appel au modèle tant que n × num_samples <= max_samples_per_call, sinon
+        les séries sont découpées en paquets.
+        """
+        histories = np.asarray(histories, dtype=np.float64)
+        if histories.ndim != 2:
+            raise ValueError(f"histories doit être de forme (n, longueur), reçu {histories.shape}")
+
+        # Normalisation de chaque série : le normaliseur interne de Toto a une échelle minimale
+        # qui le rend aveugle sur les séries très plates (écart-type ~1e-5, il y en a dans BOOM).
+        # On prévoit donc (history - moyenne) / écart-type, puis on remet les quantiles à l'échelle.
+        mean = histories.mean(axis=1, keepdims=True)
+        std = histories.std(axis=1, keepdims=True)
+        std = np.where(std > 0, std, 1.0)  # série constante : pas de division
+        scaled = ((histories - mean) / std).astype(np.float32)
+
+        chunk = max(1, self.max_samples_per_call // self.num_samples)
+        lows, highs = [], []
+        for start in range(0, len(scaled), chunk):
+            low, high = self._predict_chunk(scaled[start:start + chunk])
+            lows.append(low)
+            highs.append(high)
+        return np.concatenate(lows) * std + mean, np.concatenate(highs) * std + mean
+
+    def _predict_chunk(self, histories):
+        """Un appel au modèle pour un paquet de séries de forme (n, longueur)."""
+        # Toto attend (batch, variables, temps) : ici une seule variable par série
+        series = torch.from_numpy(histories).to(self.device).unsqueeze(1)
+        n = series.shape[0]
+        # Même construction que dans check_toto.py : timestamps non utilisés par le modèle
+        inputs = MaskedTimeseries(
+            series=series,
+            padding_mask=torch.ones_like(series, dtype=torch.bool),  # True = vraie valeur
+            id_mask=torch.zeros_like(series, dtype=torch.int),
+            timestamp_seconds=torch.zeros_like(series, dtype=torch.int),
+            time_interval_seconds=torch.full((n, 1), 60, device=self.device, dtype=torch.int),
+        )
+        with torch.inference_mode():
+            forecast = self.forecaster.forecast(
+                inputs,
+                prediction_length=HORIZON,
+                num_samples=self.num_samples,
+                samples_per_batch=self.num_samples,
+                use_kv_cache=False,  # un seul patch à prévoir : le cache ne sert pas et coûte de la mémoire
+            )
+            # samples : (n, 1, HORIZON, num_samples) -> quantiles de forme (n, HORIZON)
+            low = forecast.quantile(self.LOW_Q)[:, 0].cpu().numpy()
+            high = forecast.quantile(self.HIGH_Q)[:, 0].cpu().numpy()
+        return low, high
