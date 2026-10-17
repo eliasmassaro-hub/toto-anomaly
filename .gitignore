@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# Environnement virtuel et secrets
+.venv/
+venv/
+.env
+
+# Données téléchargées (BOOM), régénérables avec src/data.py
+data/
+
+# Divers
+.DS_Store
+.vscode/
+.idea/

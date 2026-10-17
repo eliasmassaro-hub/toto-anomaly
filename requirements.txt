@@ -1,0 +1,11 @@
+toto-ts
+fastapi
+uvicorn
+pydantic
+locust
+datasets
+numpy
+pandas
+matplotlib
+# lightning 2.3.3 (dépendance de toto-ts) importe pkg_resources, retiré de setuptools 81+
+setuptools<81
