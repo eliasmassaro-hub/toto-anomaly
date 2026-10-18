@@ -1,9 +1,14 @@
 """Étape 3 bis : réglage des détecteurs et comparaison à fausses alertes égales.
 
-Usage : python src/tuning.py
+Usage : python src/tuning.py   (~15 min sur CPU)
 Les réglages sont choisis sur la validation ; les résultats finaux sont annoncés sur le test.
+Écrit results/tuning_*.csv, results/eval_test.csv et results/recall_vs_false_alarms.png.
 """
 
+import matplotlib
+
+matplotlib.use("Agg")  # pas de fenêtre : on enregistre seulement l'image
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import torch
@@ -122,6 +127,54 @@ def final_test(history, spiked, positions, k_matched, level, num_samples):
     return pd.DataFrame(evaluate_configs(configs, history, spiked, positions))
 
 
+# --- 3.11 Figure rappel / fausses alertes ---
+
+def plot_tradeoff(baseline_df, levels_df, k_matched, level, toto_tuned,
+                  path=RESULTS / "recall_vs_false_alarms.png"):
+    """Rappel en fonction des fausses alertes par série, une courbe par méthode (validation).
+
+    level : niveau retenu en 3.7 ; toto_tuned : ligne de 3.8 pour le réglage retenu de Toto.
+    """
+    orange, aqua, ink, grey = "#eb6834", "#1baf7a", "#0b0b0b", "#52514e"
+    fa = "Fausses alertes / série"
+    fig, ax = plt.subplots(figsize=(10, 6), facecolor="#fcfcfb")
+    ax.axvline(toto_tuned[fa], color=grey, lw=1, ls=":", label="mêmes fausses alertes (3.9)")
+
+    # Méthode simple : un point par k, étiquettes sous la courbe (k de la grille de base et k retenu)
+    ax.plot(baseline_df[fa], baseline_df["Rappel"], "-o", color=orange, lw=2, ms=4,
+            label="Méthode simple (un point par k)")
+    for x, y, k in zip(baseline_df[fa], baseline_df["Rappel"], baseline_df["k"]):
+        if np.isclose(k, [*K_GRID, k_matched]).any():
+            ax.annotate(f"k = {k:g}", (x, y), textcoords="offset points", xytext=(6, -12), fontsize=8, color=grey)
+    chosen = baseline_df[np.isclose(baseline_df["k"], k_matched)].iloc[0]
+    ax.scatter(chosen[fa], chosen["Rappel"], s=160, color=orange, edgecolor=ink, linewidth=1.5, zorder=3,
+               label=f"réglage retenu : k = {k_matched:g}")
+
+    # Toto : un point par niveau d'intervalle, étiquettes au-dessus de la courbe
+    ax.plot(levels_df[fa], levels_df["Rappel"], "-o", color=aqua, lw=2, ms=4,
+            label="Toto, 256 tirages (un point par niveau, 3.7)")
+    for x, y, n in zip(levels_df[fa], levels_df["Rappel"], levels_df["Niveau"]):
+        ax.annotate(f"{n * 100:g} %", (x, y), textcoords="offset points", xytext=(-6, 8), ha="right",
+                    fontsize=8, color=grey)
+    ax.scatter(toto_tuned[fa], toto_tuned["Rappel"], s=160, color=aqua, edgecolor=ink, linewidth=1.5, zorder=3,
+               label=f"réglage retenu : niveau {level * 100:g} %, {toto_tuned['Tirages']:.0f} tirages (mesure de 3.8)")
+
+    ax.set_xlabel("fausses alertes par série (sur 61 points normaux)", color=grey)
+    ax.set_ylabel("rappel (part des pics détectés)", color=grey)
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
+    ax.set_xlim(left=0)
+    ax.set_title("Validation (100 séries) : à fausses alertes égales, la courbe la plus haute est la meilleure",
+                 color=grey, fontsize=10, loc="left")
+    ax.set_facecolor("#fcfcfb")
+    ax.grid(color="#e1e0d9", lw=0.6)
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    ax.legend(fontsize=8, frameon=False, loc="lower right")
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    print(f"Figure enregistrée : {path}")
+
+
 def main():
     # Pics de l'étape 3 (seed i pour la série i), puis découpage par indices
     history, spiked, positions = make_eval_set()
@@ -155,6 +208,10 @@ def main():
     print("3.10 Résultats finaux (test)")
     final = final_test(history[test], spiked[test], positions[test], k_matched, level, num_samples)
     save(final, "eval_test.csv", ["Détecteur", *METRICS, "ms / série"])
+
+    print("3.11 Figure rappel / fausses alertes (validation)")
+    toto_tuned = samples[samples["Tirages"] == num_samples].iloc[0]
+    plot_tradeoff(baseline_grid, levels, k_matched, level, toto_tuned)
 
 
 if __name__ == "__main__":
