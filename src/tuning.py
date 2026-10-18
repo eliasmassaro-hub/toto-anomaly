@@ -16,6 +16,10 @@ K_GRID = [2, 3, 4, 5, 6, 8, 10]  # 3.6 : valeurs de k de la méthode simple
 LEVELS = [0.90, 0.95, 0.98, 0.99, 0.995]  # 3.7 : niveaux d'intervalle de Toto
 SAMPLES_GRID = [32, 64, 128, 256]  # 3.8 : nombres de tirages de Toto
 F1_TOLERANCE = 0.01  # 3.8 : perte de F1 acceptée pour prendre moins de tirages
+FA_CLOSE = 0.10  # 3.9 : écart relatif max pour dire que deux taux de fausses alertes sont proches
+# 3.9 : grille fine, pas de 0,5. Elle va au-delà de k = 10 car la méthode simple y garde
+# encore plus de fausses alertes que Toto réglé (3,4 contre 2,6 par série sur la validation).
+FINE_K_GRID = np.arange(2, 40.5, 0.5)
 METRICS = ["Rappel", "Précision", "F1", "Fausses alertes / série"]
 
 
@@ -90,6 +94,21 @@ def sweep_toto_samples(history, spiked, positions, level, samples_grid=SAMPLES_G
     return df, int(good["Tirages"].min())
 
 
+# --- 3.9 Méthode simple au même nombre de fausses alertes que Toto ---
+
+def match_false_alarms(history, spiked, positions, baseline_df, target):
+    """k de la méthode simple dont les fausses alertes par série sont les plus proches de target.
+
+    Si aucun k de la grille n'est proche (écart relatif > FA_CLOSE), on reprend avec la grille
+    fine FINE_K_GRID. Renvoie k et le tableau du balayage utilisé.
+    """
+    gap = (baseline_df["Fausses alertes / série"] - target).abs()
+    if gap.min() > FA_CLOSE * target:
+        baseline_df = sweep_baseline(history, spiked, positions, FINE_K_GRID)
+        gap = (baseline_df["Fausses alertes / série"] - target).abs()
+    return float(baseline_df.loc[gap.idxmin(), "k"]), baseline_df
+
+
 def main():
     # Pics de l'étape 3 (seed i pour la série i), puis découpage par indices
     history, spiked, positions = make_eval_set()
@@ -110,6 +129,15 @@ def main():
     samples, num_samples = sweep_toto_samples(*v, level)
     save(samples, "tuning_toto_samples.csv", ["Tirages", *METRICS, "ms / série"], {"Tirages": "{:.0f}"})
     print(f"Tirages retenus : {num_samples}\n")
+
+    print("3.9 Méthode simple à fausses alertes égales (validation)")
+    target = samples.loc[samples["Tirages"] == num_samples, "Fausses alertes / série"].item()
+    k_matched, baseline_grid = match_false_alarms(*v, baseline, target)
+    if len(baseline_grid) > len(baseline):  # grille affinée
+        baseline_grid.round(4).to_csv(RESULTS / "tuning_baseline_fine.csv", index=False)
+    matched = baseline_grid[np.isclose(baseline_grid["k"], k_matched)].iloc[0]
+    print(f"Toto réglé : {target:.2f} fausses alertes / série -> méthode simple avec k = {k_matched:g} : "
+          f"{matched['Fausses alertes / série']:.2f} fausses alertes / série, rappel {matched['Rappel']:.1%}\n")
 
 
 if __name__ == "__main__":
