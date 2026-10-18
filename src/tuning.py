@@ -9,11 +9,13 @@ import pandas as pd
 import torch
 
 from detectors import BaselineDetector, TotoDetector, find_anomalies
-from evaluate import RESULTS, make_eval_set, print_table, scores
+from evaluate import RESULTS, evaluate_configs, make_eval_set, print_table, scores
 
 SPLIT_SEED = 0  # seed du tirage validation / test
 K_GRID = [2, 3, 4, 5, 6, 8, 10]  # 3.6 : valeurs de k de la méthode simple
 LEVELS = [0.90, 0.95, 0.98, 0.99, 0.995]  # 3.7 : niveaux d'intervalle de Toto
+SAMPLES_GRID = [32, 64, 128, 256]  # 3.8 : nombres de tirages de Toto
+F1_TOLERANCE = 0.01  # 3.8 : perte de F1 acceptée pour prendre moins de tirages
 METRICS = ["Rappel", "Précision", "F1", "Fausses alertes / série"]
 
 
@@ -70,6 +72,24 @@ def sweep_toto_levels(history, spiked, positions, levels=LEVELS, num_samples=256
     return df, float(df.loc[df["F1"].idxmax(), "Niveau"])
 
 
+# --- 3.8 Toto : nombre de tirages ---
+
+def sweep_toto_samples(history, spiked, positions, level, samples_grid=SAMPLES_GRID):
+    """Métriques et vrai temps de calcul de Toto au niveau retenu, pour chaque nombre de tirages.
+
+    Renvoie le tableau et le plus petit nombre de tirages dont le F1 est à moins de
+    F1_TOLERANCE du meilleur : le meilleur compromis entre qualité et coût.
+    """
+    configs = {
+        f"Toto, {s} tirages": (lambda s=s: TotoDetector(num_samples=s, level=level)) for s in samples_grid
+    }
+    df = pd.DataFrame(evaluate_configs(configs, history, spiked, positions))
+    df.insert(0, "Tirages", samples_grid)
+    df = df.drop(columns="Détecteur")
+    good = df[df["F1"] >= df["F1"].max() - F1_TOLERANCE]
+    return df, int(good["Tirages"].min())
+
+
 def main():
     # Pics de l'étape 3 (seed i pour la série i), puis découpage par indices
     history, spiked, positions = make_eval_set()
@@ -85,6 +105,11 @@ def main():
     levels, level = sweep_toto_levels(*v)
     save(levels, "tuning_toto_quantiles.csv", ["Niveau", *METRICS], {"Niveau": "{:.1%}"})
     print(f"Niveau retenu (meilleur F1) : {level:.1%}\n")
+
+    print(f"3.8 Toto : nombre de tirages au niveau {level:.1%} (validation)")
+    samples, num_samples = sweep_toto_samples(*v, level)
+    save(samples, "tuning_toto_samples.csv", ["Tirages", *METRICS, "ms / série"], {"Tirages": "{:.0f}"})
+    print(f"Tirages retenus : {num_samples}\n")
 
 
 if __name__ == "__main__":
