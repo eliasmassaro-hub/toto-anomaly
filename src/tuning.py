@@ -109,6 +109,19 @@ def match_false_alarms(history, spiked, positions, baseline_df, target):
     return float(baseline_df.loc[gap.idxmin(), "k"]), baseline_df
 
 
+# --- 3.10 Résultats finaux sur le test ---
+
+def final_test(history, spiked, positions, k_matched, level, num_samples):
+    """Les trois configurations finales, évaluées sur le test."""
+    configs = {
+        "Méthode simple (k = 3, défaut)": lambda: BaselineDetector(k=3),
+        f"Méthode simple (k = {k_matched:g}, mêmes fausses alertes que Toto)": lambda: BaselineDetector(k=k_matched),
+        f"Toto réglé (niveau {level * 100:g} %, {num_samples} tirages)":
+            lambda: TotoDetector(num_samples=num_samples, level=level),
+    }
+    return pd.DataFrame(evaluate_configs(configs, history, spiked, positions))
+
+
 def main():
     # Pics de l'étape 3 (seed i pour la série i), puis découpage par indices
     history, spiked, positions = make_eval_set()
@@ -138,6 +151,10 @@ def main():
     matched = baseline_grid[np.isclose(baseline_grid["k"], k_matched)].iloc[0]
     print(f"Toto réglé : {target:.2f} fausses alertes / série -> méthode simple avec k = {k_matched:g} : "
           f"{matched['Fausses alertes / série']:.2f} fausses alertes / série, rappel {matched['Rappel']:.1%}\n")
+
+    print("3.10 Résultats finaux (test)")
+    final = final_test(history[test], spiked[test], positions[test], k_matched, level, num_samples)
+    save(final, "eval_test.csv", ["Détecteur", *METRICS, "ms / série"])
 
 
 if __name__ == "__main__":
