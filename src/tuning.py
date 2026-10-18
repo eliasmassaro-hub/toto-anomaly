@@ -6,12 +6,14 @@ Les réglages sont choisis sur la validation ; les résultats finaux sont annonc
 
 import numpy as np
 import pandas as pd
+import torch
 
-from detectors import BaselineDetector, find_anomalies
+from detectors import BaselineDetector, TotoDetector, find_anomalies
 from evaluate import RESULTS, make_eval_set, print_table, scores
 
 SPLIT_SEED = 0  # seed du tirage validation / test
 K_GRID = [2, 3, 4, 5, 6, 8, 10]  # 3.6 : valeurs de k de la méthode simple
+LEVELS = [0.90, 0.95, 0.98, 0.99, 0.995]  # 3.7 : niveaux d'intervalle de Toto
 METRICS = ["Rappel", "Précision", "F1", "Fausses alertes / série"]
 
 
@@ -48,6 +50,26 @@ def sweep_baseline(history, spiked, positions, k_grid=K_GRID):
     return pd.DataFrame(rows)
 
 
+# --- 3.7 Toto : niveau de l'intervalle ---
+
+def sweep_toto_levels(history, spiked, positions, levels=LEVELS, num_samples=256):
+    """Métriques de Toto pour chaque niveau d'intervalle ; renvoie le tableau et le niveau au meilleur F1.
+
+    Toto ne tourne qu'une fois par série : tous les quantiles sont calculés sur les mêmes tirages.
+    """
+    torch.manual_seed(0)  # tirages reproductibles
+    print(f"Toto, {num_samples} tirages : {len(history)} séries...", flush=True)
+    samples = TotoDetector(num_samples=num_samples).predict_samples_batch(history)
+    rows = []
+    for level in levels:
+        q = (1 - level) / 2  # même formule que TotoDetector
+        low, high = np.quantile(samples, [q, 1 - q], axis=-1)
+        detected = [find_anomalies(f, lo, hi) for f, lo, hi in zip(spiked, low, high)]
+        rows.append({"Niveau": level, "Quantile bas": q, "Quantile haut": 1 - q, **scores(detected, positions)})
+    df = pd.DataFrame(rows)
+    return df, float(df.loc[df["F1"].idxmax(), "Niveau"])
+
+
 def main():
     # Pics de l'étape 3 (seed i pour la série i), puis découpage par indices
     history, spiked, positions = make_eval_set()
@@ -58,6 +80,11 @@ def main():
     print("3.6 Méthode simple : balayage de k (validation)")
     baseline = sweep_baseline(*v)
     save(baseline, "tuning_baseline.csv", ["k", *METRICS], {"k": "{:g}"})
+
+    print("3.7 Toto : niveau de l'intervalle, 256 tirages (validation)")
+    levels, level = sweep_toto_levels(*v)
+    save(levels, "tuning_toto_quantiles.csv", ["Niveau", *METRICS], {"Niveau": "{:.1%}"})
+    print(f"Niveau retenu (meilleur F1) : {level:.1%}\n")
 
 
 if __name__ == "__main__":

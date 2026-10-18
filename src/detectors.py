@@ -43,13 +43,15 @@ def find_anomalies(future, low, high):
 
 
 class TotoDetector:
-    """Intervalle de Toto : quantiles 0,005 et 0,995 de num_samples trajectoires prévues."""
+    """Intervalle de Toto : quantiles d'un niveau donné sur num_samples trajectoires prévues."""
 
     MODEL_ID = "Datadog/Toto-Open-Base-1.0"
-    LOW_Q, HIGH_Q = 0.005, 0.995
 
-    def __init__(self, num_samples=256, max_samples_per_call=512, device=None):
+    def __init__(self, num_samples=256, level=0.99, max_samples_per_call=512, device=None):
         self.num_samples = num_samples
+        # Intervalle centré de niveau level : level = 0,99 donne les quantiles 0,005 et 0,995
+        self.low_q = (1 - level) / 2
+        self.high_q = 1 - self.low_q
         # Chaque série est dupliquée num_samples fois dans le batch du modèle : on limite le
         # nombre de séries × échantillons par appel pour borner la mémoire. Sur CPU (16 Go),
         # 512 utilise ~5 Go ; à 4096 la machine swappe et l'appel devient 10 fois plus lent.
@@ -66,7 +68,13 @@ class TotoDetector:
         return low[0], high[0]
 
     def predict_interval_batch(self, histories):
-        """Intervalles de plusieurs séries de même longueur ; renvoie low et high de forme (n, HORIZON).
+        """Intervalles de plusieurs séries de même longueur ; renvoie low et high de forme (n, HORIZON)."""
+        samples = self.predict_samples_batch(histories)
+        low, high = np.quantile(samples, [self.low_q, self.high_q], axis=-1)
+        return low, high
+
+    def predict_samples_batch(self, histories):
+        """Tirages de Toto à l'échelle d'origine, de forme (n, HORIZON, num_samples).
 
         Un seul appel au modèle tant que n × num_samples <= max_samples_per_call, sinon
         les séries sont découpées en paquets.
@@ -77,21 +85,19 @@ class TotoDetector:
 
         # Normalisation de chaque série : le normaliseur interne de Toto a une échelle minimale
         # qui le rend aveugle sur les séries très plates (écart-type ~1e-5, il y en a dans BOOM).
-        # On prévoit donc (history - moyenne) / écart-type, puis on remet les quantiles à l'échelle.
+        # On prévoit donc (history - moyenne) / écart-type, puis on remet les tirages à l'échelle.
         mean = histories.mean(axis=1, keepdims=True)
         std = histories.std(axis=1, keepdims=True)
         std = np.where(std > 0, std, 1.0)  # série constante : pas de division
         scaled = ((histories - mean) / std).astype(np.float32)
 
         chunk = max(1, self.max_samples_per_call // self.num_samples)
-        lows, highs = [], []
-        for start in range(0, len(scaled), chunk):
-            low, high = self._predict_chunk(scaled[start:start + chunk])
-            lows.append(low)
-            highs.append(high)
-        return np.concatenate(lows) * std + mean, np.concatenate(highs) * std + mean
+        samples = np.concatenate(
+            [self._sample_chunk(scaled[start:start + chunk]) for start in range(0, len(scaled), chunk)]
+        )
+        return samples * std[:, :, None] + mean[:, :, None]
 
-    def _predict_chunk(self, histories):
+    def _sample_chunk(self, histories):
         """Un appel au modèle pour un paquet de séries de forme (n, longueur)."""
         # Toto attend (batch, variables, temps) : ici une seule variable par série
         series = torch.from_numpy(histories).to(self.device).unsqueeze(1)
@@ -112,7 +118,5 @@ class TotoDetector:
                 samples_per_batch=self.num_samples,
                 use_kv_cache=False,  # un seul patch à prévoir : le cache ne sert pas et coûte de la mémoire
             )
-            # samples : (n, 1, HORIZON, num_samples) -> quantiles de forme (n, HORIZON)
-            low = forecast.quantile(self.LOW_Q)[:, 0].cpu().numpy()
-            high = forecast.quantile(self.HIGH_Q)[:, 0].cpu().numpy()
-        return low, high
+        # samples : (n, 1, HORIZON, num_samples) -> (n, HORIZON, num_samples)
+        return forecast.samples[:, 0].cpu().numpy()
