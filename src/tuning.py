@@ -20,7 +20,9 @@ SPLIT_SEED = 0  # seed du tirage validation / test
 K_GRID = [2, 3, 4, 5, 6, 8, 10]  # 3.6 : valeurs de k de la méthode simple
 LEVELS = [0.90, 0.95, 0.98, 0.99, 0.995]  # 3.7 : niveaux d'intervalle de Toto
 SAMPLES_GRID = [32, 64, 128, 256]  # 3.8 : nombres de tirages de Toto
-F1_TOLERANCE = 0.01  # 3.8 : perte de F1 acceptée pour prendre moins de tirages
+# 3.8 : perte de F1 acceptée pour prendre moins de tirages. Fixée au niveau du bruit des tirages :
+# le même réglage (99 %, 256 tirages) donne un F1 de 0,626 en 3.7 et 0,609 en 3.8.
+F1_TOLERANCE = 0.02
 FA_CLOSE = 0.10  # 3.9 : écart relatif max pour dire que deux taux de fausses alertes sont proches
 # 3.9 : grille fine, pas de 0,5. Elle va au-delà de k = 10 car la méthode simple y garde
 # encore plus de fausses alertes que Toto réglé (3,4 contre 2,6 par série sur la validation).
