@@ -1,15 +1,20 @@
 """Étape 3 : évaluation des détecteurs sur les 200 séries, hors API.
 
-Usage : python src/evaluate.py
+Usage : python src/evaluate.py   (~10 min sur CPU, surtout Toto avec 256 échantillons)
+Écrit results/eval.csv et affiche le tableau.
 """
 
 import time
+from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import torch
 
 from data import inject_spikes, load_series, split_history_future
 from detectors import BaselineDetector, TotoDetector, find_anomalies
+
+RESULTS = Path(__file__).resolve().parent.parent / "results"
 
 # Configurations comparées ; Toto n'est chargé qu'au moment de son évaluation
 CONFIGS = {
@@ -74,3 +79,19 @@ def run_evaluation(n_series=None):
             "ms / série": ms,
         })
     return rows
+
+
+# --- 3.3 Tableau des résultats ---
+
+def save_and_print(rows, path=RESULTS / "eval.csv"):
+    """Enregistre le tableau en CSV et l'affiche au format Markdown."""
+    pd.DataFrame(rows).round({"Rappel": 4, "ms / série": 2}).to_csv(path, index=False)
+    print("\n| Détecteur | Rappel | Fausses alertes | ms / série |")
+    print("|---|---|---|---|")
+    for r in rows:
+        print(f"| {r['Détecteur']} | {r['Rappel']:.1%} | {r['Fausses alertes']} | {r['ms / série']:.2f} |")
+    print(f"\nTableau enregistré : {path}")
+
+
+if __name__ == "__main__":
+    save_and_print(run_evaluation())

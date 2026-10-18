@@ -1,0 +1,4 @@
+Détecteur,Rappel,Fausses alertes,ms / série
+Méthode simple,0.9767,1935,0.03
+Toto (32 échantillons),0.9167,1310,274.16
+Toto (256 échantillons),0.8233,563,2048.0
