@@ -8,6 +8,8 @@ datasets
 numpy
 pandas
 matplotlib
+# demo page; pinned: this version keeps numpy 1.26.4, pyarrow < 26 and setuptools < 81 unchanged
+streamlit==1.66.1
 # lightning 2.3.3 (a toto-ts dependency) imports pkg_resources, removed in setuptools 81+
 setuptools<81
 # toto-ts pins numpy 1.26.4, but pyarrow 26+ requires numpy 2 (otherwise `import datasets` fails)
