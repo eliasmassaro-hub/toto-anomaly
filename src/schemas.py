@@ -1,24 +1,24 @@
-"""Formats des données échangées avec l'API."""
+"""Formats of the data exchanged with the API."""
 
 from typing import Literal
 
 from pydantic import BaseModel, Field, FiniteFloat
 
-from data import CONTEXT, HORIZON  # 1024 et 64
+from data import CONTEXT, HORIZON  # 1024 and 64
 
 
 class SeriesIn(BaseModel):
-    """Une série envoyée par le client."""
+    """A series sent by the client."""
 
     id: str
-    # FiniteFloat refuse NaN et Infinity, que le JSON de Python accepte : sinon le calcul
-    # produirait des NaN, impossibles à renvoyer en JSON
-    history: list[FiniteFloat] = Field(min_length=CONTEXT)  # au moins 1024 points
-    recent: list[FiniteFloat] = Field(min_length=1, max_length=HORIZON)  # entre 1 et 64 points
+    # FiniteFloat rejects NaN and Infinity, which Python's JSON accepts: otherwise the computation
+    # would produce NaN, which cannot be returned as JSON
+    history: list[FiniteFloat] = Field(min_length=CONTEXT)  # at least 1024 points
+    recent: list[FiniteFloat] = Field(min_length=1, max_length=HORIZON)  # between 1 and 64 points
 
 
 class JobRequest(BaseModel):
-    """Le corps du POST /v1/detection-jobs."""
+    """The body of POST /v1/detection-jobs."""
 
     method: Literal["toto", "baseline"] = "toto"
     series: list[SeriesIn] = Field(min_length=1, max_length=100)

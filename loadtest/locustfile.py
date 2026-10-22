@@ -1,10 +1,10 @@
-"""Étape 5.2 : test de charge de l'API avec Locust.
+"""Step 5.2: load test of the API with Locust.
 
-Chaque utilisateur simulé crée un job d'une série, puis interroge son statut jusqu'à done.
-En plus des requêtes HTTP, on envoie à Locust une métrique « bout en bout » : le temps entre
-la création du job et le statut done, qui compte l'attente dans la file et le calcul.
+Each simulated user creates a job with one series, then polls its status until done.
+On top of the HTTP requests, we send Locust an "end-to-end" metric: the time between
+the job creation and the done status, which includes the wait in the queue and the computation.
 
-Usage (le serveur tourne à part, voir README) :
+Usage (the server runs separately, see README):
     locust -f loadtest/locustfile.py --host http://localhost:8000 --headless -u 32 -r 32 -t 3m --csv loadtest/out/batch16
 """
 
@@ -20,7 +20,7 @@ from data import inject_spikes, load_series, split_history_future  # noqa: E402
 
 POLL_INTERVAL_S = 0.2
 
-# Une requête prête par série du dataset, avec ses pics injectés (seed i pour la série i)
+# One ready-made request per dataset series, with its injected spikes (seed i for series i)
 values, ids, _ = load_series()
 histories, futures = split_history_future(values)
 PAYLOADS = []
@@ -33,28 +33,28 @@ for i in range(len(values)):
 
 
 class DetectionUser(HttpUser):
-    wait_time = constant(0)  # un nouveau job dès que le précédent est fini
+    wait_time = constant(0)  # a new job as soon as the previous one is done
 
     @task
     def detect_one_series(self):
         start = time.perf_counter()
         with self.client.post("/v1/detection-jobs", json=random.choice(PAYLOADS), catch_response=True) as response:
-            if response.status_code != 202:  # 429 si la file est pleine
+            if response.status_code != 202:  # 429 if the queue is full
                 response.failure(f"{response.status_code} {response.text}")
                 return
             job_id = response.json()["job_id"]
 
-        # Polling ; name regroupe toutes les lectures sous une seule ligne dans les statistiques
+        # Polling; name groups all the reads under a single line in the statistics
         while True:
             job = self.client.get(f"/v1/detection-jobs/{job_id}", name="/v1/detection-jobs/{job_id}").json()
             if job["status"] in ("done", "failed"):
                 break
-            time.sleep(POLL_INTERVAL_S)  # Locust rend time.sleep non bloquant pour les autres utilisateurs
+            time.sleep(POLL_INTERVAL_S)  # Locust makes time.sleep non-blocking for the other users
 
-        # Métrique personnalisée : Locust la traite comme une requête, en ms, avec ses percentiles
+        # Custom metric: Locust handles it like a request, in ms, with its percentiles
         self.environment.events.request.fire(
             request_type="JOB",
-            name="bout en bout",
+            name="end-to-end",
             response_time=1000 * (time.perf_counter() - start),
             response_length=0,
             exception=None if job["status"] == "done" else Exception(job["error"]["message"]),

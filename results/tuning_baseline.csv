@@ -1,4 +1,4 @@
-k,Rappel,Précision,F1,TP,Fausses alertes,Fausses alertes / série
+k,Recall,Precision,F1,TP,False alarms,False alarms / series
 2,0.9967,0.1908,0.3203,299,1268,12.68
 3,0.9733,0.2628,0.4139,292,819,8.19
 4,0.9333,0.2954,0.4487,280,668,6.68

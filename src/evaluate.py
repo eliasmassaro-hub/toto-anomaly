@@ -1,7 +1,7 @@
-"""Étape 3 : évaluation des détecteurs sur les 200 séries, hors API.
+"""Step 3: evaluation of the detectors on the 200 series, outside the API.
 
-Usage : python src/evaluate.py   (~10 min sur CPU, surtout Toto avec 256 échantillons)
-Écrit results/eval.csv et affiche le tableau.
+Usage: python src/evaluate.py   (~10 min on CPU, mostly Toto with 256 samples)
+Writes results/eval.csv and prints the table.
 """
 
 import time
@@ -16,42 +16,42 @@ from detectors import BaselineDetector, TotoDetector, find_anomalies
 
 RESULTS = Path(__file__).resolve().parent.parent / "results"
 
-# Configurations comparées ; Toto n'est chargé qu'au moment de son évaluation
+# Compared configurations; Toto is only loaded when it is evaluated
 CONFIGS = {
-    "Méthode simple": lambda: BaselineDetector(window=200, k=3),
-    "Toto (32 échantillons)": lambda: TotoDetector(num_samples=32),
-    "Toto (256 échantillons)": lambda: TotoDetector(num_samples=256),
+    "Baseline": lambda: BaselineDetector(window=200, k=3),
+    "Toto (32 samples)": lambda: TotoDetector(num_samples=32),
+    "Toto (256 samples)": lambda: TotoDetector(num_samples=256),
 }
 
 
-# --- 3.1 Métriques ---
+# --- 3.1 Metrics ---
 
 def true_positives(detected, positions):
-    """Vrais positifs (TP) = pics injectés signalés, cumulé sur toutes les séries.
+    """True positives (TP) = injected spikes that are flagged, summed over all series.
 
-    detected et positions : une liste par série des positions dans le futur
-    (points signalés par le détecteur, pics injectés).
+    detected and positions: one list per series of positions in the future
+    (points flagged by the detector, injected spikes).
     """
     return sum(len(np.intersect1d(d, p)) for d, p in zip(detected, positions))
 
 
 def recall(detected, positions):
-    """Rappel = pics détectés / pics injectés, cumulé sur toutes les séries."""
+    """Recall = detected spikes / injected spikes, summed over all series."""
     return true_positives(detected, positions) / sum(len(p) for p in positions)
 
 
 def false_alarms(detected, positions):
-    """Fausses alertes (faux positifs, FP) = points signalés qui ne sont pas des pics, cumulé."""
+    """False alarms (false positives, FP) = flagged points that are not spikes, summed."""
     return sum(len(np.setdiff1d(d, p)) for d, p in zip(detected, positions))
 
 
 def detect_all(detector, histories, futures):
-    """Détecte les anomalies série par série ; renvoie les points signalés et le temps moyen en ms.
+    """Detects anomalies series by series; returns the flagged points and the mean time in ms.
 
-    Le temps mesuré couvre la prévision de l'intervalle et la comparaison avec le futur.
-    Un premier appel d'échauffement (plus lent : allocations, caches) n'est pas compté.
+    The measured time covers the interval forecast and the comparison with the future.
+    A first warm-up call (slower: allocations, caches) is not counted.
     """
-    detector.predict_interval(histories[0])  # échauffement
+    detector.predict_interval(histories[0])  # warm-up
     detected, elapsed = [], 0.0
     for history, future in zip(histories, futures):
         start = time.perf_counter()
@@ -61,41 +61,41 @@ def detect_all(detector, histories, futures):
     return detected, elapsed / len(histories) * 1000
 
 
-# --- 3.4 Précision, F1, fausses alertes par série ---
+# --- 3.4 Precision, F1, false alarms per series ---
 
 def scores(detected, positions):
-    """Toutes les métriques, calculées sur les totaux de toutes les séries.
+    """All metrics, computed on the totals over all series.
 
-    La précision est calculée sur les totaux (et non en moyenne par série) pour éviter
-    les divisions par zéro sur les séries sans alerte.
+    Precision is computed on the totals (not averaged per series) to avoid
+    divisions by zero on series without any alarm.
     """
     tp = true_positives(detected, positions)
     fp = false_alarms(detected, positions)
     rec = recall(detected, positions)
-    prec = tp / (tp + fp) if tp + fp else 0.0  # aucune alerte : précision fixée à 0
+    prec = tp / (tp + fp) if tp + fp else 0.0  # no alarm at all: precision set to 0
     f1 = 2 * prec * rec / (prec + rec) if prec + rec else 0.0
     return {
-        "Rappel": rec,
-        "Précision": prec,
+        "Recall": rec,
+        "Precision": prec,
         "F1": f1,
         "TP": tp,
-        "Fausses alertes": fp,
-        "Fausses alertes / série": fp / len(positions),
+        "False alarms": fp,
+        "False alarms / series": fp / len(positions),
     }
 
 
-# Format d'affichage des colonnes dans les tableaux Markdown
+# Display format of the columns in the Markdown tables
 FORMATS = {
-    "Rappel": "{:.1%}",
-    "Précision": "{:.1%}",
+    "Recall": "{:.1%}",
+    "Precision": "{:.1%}",
     "F1": "{:.3f}",
-    "Fausses alertes / série": "{:.2f}",
-    "ms / série": "{:.2f}",
+    "False alarms / series": "{:.2f}",
+    "ms / series": "{:.2f}",
 }
 
 
 def print_table(df, columns, formats=None):
-    """Affiche les colonnes choisies d'un tableau au format Markdown (formats : formats en plus)."""
+    """Prints the chosen columns of a table in Markdown format (formats: extra formats)."""
     formats = {**FORMATS, **(formats or {})}
     print("| " + " | ".join(columns) + " |")
     print("|" + "---|" * len(columns))
@@ -103,13 +103,13 @@ def print_table(df, columns, formats=None):
         print("| " + " | ".join(formats.get(c, "{}").format(row[c]) for c in columns) + " |")
 
 
-# --- 3.2 Boucle d'évaluation ---
+# --- 3.2 Evaluation loop ---
 
 def make_eval_set(n_series=None):
-    """Historiques, futurs avec pics et positions des pics des n_series premières séries.
+    """Histories, futures with spikes and spike positions of the first n_series series.
 
-    Les pics de la série i sont injectés avec la seed i : ils sont identiques pour tous
-    les détecteurs et pour tout sous-ensemble des séries (validation, test).
+    The spikes of series i are injected with seed i: they are the same for all
+    detectors and for any subset of the series (validation, test).
     """
     values, _, _ = load_series()
     history, future = split_history_future(values[:n_series])
@@ -118,31 +118,31 @@ def make_eval_set(n_series=None):
 
 
 def evaluate_configs(configs, history, spiked, positions):
-    """Évalue chaque configuration sur les mêmes séries et les mêmes pics ; une ligne par détecteur."""
+    """Evaluates each configuration on the same series and the same spikes; one row per detector."""
     rows = []
     for name, make_detector in configs.items():
-        torch.manual_seed(0)  # tirages de Toto reproductibles
+        torch.manual_seed(0)  # reproducible Toto samples
         detector = make_detector()
-        print(f"{name} : {len(history)} séries...", flush=True)
+        print(f"{name}: {len(history)} series...", flush=True)
         detected, ms = detect_all(detector, history, spiked)
-        rows.append({"Détecteur": name, **scores(detected, positions), "ms / série": ms})
+        rows.append({"Detector": name, **scores(detected, positions), "ms / series": ms})
     return rows
 
 
 def run_evaluation(n_series=None):
-    """Évaluation de l'étape 3 : les trois configurations de CONFIGS sur toutes les séries."""
+    """Step 3 evaluation: the three configurations of CONFIGS on all series."""
     return evaluate_configs(CONFIGS, *make_eval_set(n_series))
 
 
-# --- 3.3 Tableau des résultats ---
+# --- 3.3 Results table ---
 
 def save_and_print(rows, path=RESULTS / "eval.csv"):
-    """Enregistre le tableau en CSV et l'affiche au format Markdown."""
+    """Saves the table as CSV and prints it in Markdown format."""
     df = pd.DataFrame(rows)
     df.round(4).to_csv(path, index=False)
     print()
-    print_table(df, ["Détecteur", "Rappel", "Précision", "F1", "Fausses alertes / série", "ms / série"])
-    print(f"\nTableau enregistré : {path}")
+    print_table(df, ["Detector", "Recall", "Precision", "F1", "False alarms / series", "ms / series"])
+    print(f"\nTable saved: {path}")
 
 
 if __name__ == "__main__":

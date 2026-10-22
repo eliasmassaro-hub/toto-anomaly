@@ -1,18 +1,18 @@
-# Spécification de l'API de détection d'anomalies
+# Anomaly detection API specification
 
 ## Endpoints
 
-| Méthode | Chemin | Rôle | Codes de réponse possibles |
+| Method | Path | Purpose | Possible response codes |
 |---|---|---|---|
-| GET | /health | vérifier que le serveur tourne | 200 |
-| POST | /v1/detection-jobs | créer un job de détection | 202, 400, 429 |
-| GET | /v1/detection-jobs/{job_id} | lire le statut et le résultat d'un job | 200, 404 |
+| GET | /health | check that the server is running | 200 |
+| POST | /v1/detection-jobs | create a detection job | 202, 400, 429 |
+| GET | /v1/detection-jobs/{job_id} | read the status and result of a job | 200, 404 |
 
-Tout endpoint peut aussi renvoyer `500` en cas d'erreur imprévue du serveur (voir le format d'erreur).
+Any endpoint can also return `500` on an unexpected server error (see the error format).
 
 ## GET /health
 
-Réponse `200` :
+`200` response:
 
 ```json
 {"status": "ok"}
@@ -20,103 +20,103 @@ Réponse `200` :
 
 ## POST /v1/detection-jobs
 
-Corps de la requête :
+Request body:
 
 ```json
 {
   "method": "toto",
   "series": [
-    {"id": "api-paiement-erreurs",
+    {"id": "payment-api-errors",
      "history": [0.30, 0.31, ...],
      "recent": [0.29, 8.1, ...]}
   ]
 }
 ```
 
-Règles de validation (sinon `400`, et aucun job n'est créé) :
+Validation rules (otherwise `400`, and no job is created):
 
-- `method` vaut `"toto"` ou `"baseline"` (`"toto"` par défaut) ;
-- `series` contient entre 1 et 100 séries ;
-- chaque série a un `id` (texte) ;
-- `history` contient au moins 1024 nombres (seuls les 1024 derniers sont utilisés) ;
-- `recent` contient entre 1 et 64 nombres ;
-- `NaN` et `Infinity` sont refusés dans `history` et `recent`.
+- `method` is `"toto"` or `"baseline"` (`"toto"` by default);
+- `series` contains between 1 and 100 series;
+- each series has an `id` (string);
+- `history` contains at least 1024 numbers (only the last 1024 are used);
+- `recent` contains between 1 and 64 numbers;
+- `NaN` and `Infinity` are rejected in `history` and `recent`.
 
-Réponse `202` :
+`202` response:
 
 ```json
 {"job_id": "a3f9c2...", "status": "pending"}
 ```
 
-Réponse `400` (requête invalide, le message indique le premier champ en cause) :
+`400` response (invalid request, the message names the first field at fault):
 
 ```json
-{"error": "invalid_request", "message": "body.series.0.history : List should have at least 1024 items after validation, not 10"}
+{"error": "invalid_request", "message": "body.series.0.history: List should have at least 1024 items after validation, not 10"}
 ```
 
-Réponse `429` (file pleine, réessayer plus tard) :
+`429` response (queue full, retry later):
 
 ```json
-{"error": "queue_full", "message": "file d'attente pleine (100 jobs), réessayer plus tard"}
+{"error": "queue_full", "message": "queue full (100 jobs), retry later"}
 ```
 
 ## GET /v1/detection-jobs/{job_id}
 
-Réponse `200`, job en attente ou en cours (`"running"` une fois que le worker l'a pris) :
+`200` response, job waiting or in progress (`"running"` once the worker has taken it):
 
 ```json
 {"job_id": "a3f9c2...", "status": "pending", "results": null, "error": null}
 ```
 
-Réponse `200`, job terminé :
+`200` response, job done:
 
 ```json
 {"job_id": "a3f9c2...", "status": "done", "error": null,
- "results": [{"id": "api-paiement-erreurs",
+ "results": [{"id": "payment-api-errors",
               "anomalies": [1],
               "low": [...], "high": [...]}]}
 ```
 
-- `anomalies` : positions des points anormaux dans `recent` (0 = premier point) ;
-- `low` et `high` : l'intervalle prévu, de même longueur que `recent`.
+- `anomalies`: positions of the anomalous points in `recent` (0 = first point);
+- `low` and `high`: the forecast interval, of the same length as `recent`.
 
-Réponse `200`, job échoué pendant le calcul (`error` suit le format d'erreur unique) :
+`200` response, job failed during the computation (`error` follows the single error format):
 
 ```json
 {"job_id": "a3f9c2...", "status": "failed", "results": null,
  "error": {"error": "internal_error", "message": "ValueError: ..."}}
 ```
 
-Réponse `404` (job inconnu) :
+`404` response (unknown job):
 
 ```json
-{"error": "not_found", "message": "job a3f9c2... introuvable"}
+{"error": "not_found", "message": "job a3f9c2... not found"}
 ```
 
-## Statuts d'un job
+## Job statuses
 
-`pending` (dans la file) → `running` (en calcul) → `done` (terminé) ou `failed` (erreur pendant le calcul)
+`pending` (in the queue) → `running` (being computed) → `done` (finished) or `failed` (error during the computation)
 
-## Deux familles d'erreurs
+## Two kinds of errors
 
-- **Le client s'est trompé** (requête invalide) : réponse `400` au POST, aucun job n'est créé.
-- **Le serveur a échoué pendant le calcul** : le job existe et passe à `failed`.
+- **The client made a mistake** (invalid request): `400` response to the POST, no job is created.
+- **The server failed during the computation**: the job exists and moves to `failed`.
 
-## Format d'erreur (toujours le même)
+## Error format (always the same)
 
 ```json
-{"error": "<code court>", "message": "<explication lisible>"}
+{"error": "<short code>", "message": "<human-readable explanation>"}
 ```
 
-Codes courts : `invalid_request` (400), `not_found` (404), `queue_full` (429), `internal_error` (500, ou dans le champ `error` d'un job `failed`).
+Short codes: `invalid_request` (400), `not_found` (404), `queue_full` (429), `internal_error` (500, or in the `error` field of a `failed` job).
 
-Ce format sert aussi de champ `error` à un job `failed` : le client lit toutes les erreurs de la même façon.
+This format is also used for the `error` field of a `failed` job: the client reads all errors the same way.
 
-## Limites connues
+## Known limitations
 
-- **Jobs stockés en mémoire** : perdus si le serveur redémarre, et impossibles à partager entre plusieurs serveurs (il faudrait Redis ou une base de données).
-- **Un seul worker** : il traite les jobs par batchs (`BATCH_SIZE` jobs au plus, ou ceux arrivés en `MAX_WAIT_MS`) ; un batch qui échoue fait passer tous ses jobs à `failed`.
-- **Pas de nettoyage** : les jobs terminés restent en mémoire indéfiniment (il faudrait une durée de vie, ou TTL).
-- **Pas d'idempotence** : si le client renvoie la même requête (après une coupure réseau, par exemple), deux jobs sont créés.
-- **Pas d'authentification** ni de limite par client (rate limiting).
-- **Polling** : le client doit redemander le statut ; une alternative serait de le prévenir quand c'est fini (webhook).
+- **Jobs stored in memory**: lost if the server restarts, and impossible to share between several servers (Redis or a database would be needed).
+- **A single worker**: it processes jobs in batches (`BATCH_SIZE` jobs at most, or those that arrived within `MAX_WAIT_MS`); a batch that fails moves all its jobs to `failed`.
+- **No cleanup**: finished jobs stay in memory forever (a time to live, or TTL, would be needed).
+- **No idempotency**: if the client sends the same request again (after a network failure, for example), two jobs are created.
+- **No authentication** and no per-client limit (rate limiting).
+- **Polling**: the client has to ask for the status again; an alternative would be to notify it when the job is done (webhook).

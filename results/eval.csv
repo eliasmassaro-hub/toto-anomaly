@@ -1,4 +1,4 @@
-Détecteur,Rappel,Précision,F1,TP,Fausses alertes,Fausses alertes / série,ms / série
-Méthode simple,0.9767,0.2324,0.3755,586,1935,9.675,0.0303
-Toto (32 échantillons),0.9167,0.2957,0.4472,550,1310,6.55,291.5002
-Toto (256 échantillons),0.8233,0.4674,0.5963,494,563,2.815,2070.3683
+Detector,Recall,Precision,F1,TP,False alarms,False alarms / series,ms / series
+Baseline,0.9767,0.2324,0.3755,586,1935,9.675,0.0303
+Toto (32 samples),0.9167,0.2957,0.4472,550,1310,6.55,291.5002
+Toto (256 samples),0.8233,0.4674,0.5963,494,563,2.815,2070.3683

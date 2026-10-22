@@ -1,6 +1,6 @@
-"""Étape 0.3 : vérifie que Toto se charge et fait une prévision sur une série aléatoire.
+"""Step 0.3: checks that Toto loads and makes a forecast on a random series.
 
-Usage : python src/check_toto.py [--num-samples 256]
+Usage: python src/check_toto.py [--num-samples 256]
 """
 
 import argparse
@@ -12,8 +12,8 @@ from toto.data.util.dataset import MaskedTimeseries
 from toto.inference.forecaster import TotoForecaster
 from toto.model.toto import Toto
 
-CONTEXT = 1024  # longueur de l'historique
-HORIZON = 64  # nombre de points prévus (= 1 patch Toto)
+CONTEXT = 1024  # history length
+HORIZON = 64  # number of forecast points (= 1 Toto patch)
 
 
 def main():
@@ -22,32 +22,32 @@ def main():
     args = parser.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Device : {device}")
+    print(f"Device: {device}")
 
-    # Chargement du modèle (téléchargé depuis Hugging Face au premier lancement)
+    # Model loading (downloaded from Hugging Face on the first run)
     t0 = time.perf_counter()
     toto = Toto.from_pretrained("Datadog/Toto-Open-Base-1.0").to(device)
     toto.eval()
     forecaster = TotoForecaster(toto.model)
-    print(f"Modèle chargé en {time.perf_counter() - t0:.1f} s")
+    print(f"Model loaded in {time.perf_counter() - t0:.1f} s")
 
-    # Série aléatoire : sinusoïde + bruit, forme (variables=1, temps=CONTEXT)
+    # Random series: sine wave + noise, shape (variables=1, time=CONTEXT)
     rng = np.random.default_rng(0)
     t = np.arange(CONTEXT)
     values = 10 + 3 * np.sin(2 * np.pi * t / 100) + rng.normal(0, 0.5, CONTEXT)
     series = torch.tensor(values, dtype=torch.float32, device=device).unsqueeze(0)
 
-    # Toto attend un MaskedTimeseries. Les timestamps ne sont pas utilisés par le modèle actuel,
-    # mais l'API les demande : on met des zéros et un pas de 60 s.
+    # Toto expects a MaskedTimeseries. Timestamps are not used by the current model,
+    # but the API requires them: we pass zeros and a 60 s step.
     inputs = MaskedTimeseries(
         series=series,
-        padding_mask=torch.ones_like(series, dtype=torch.bool),  # True = vraie valeur
+        padding_mask=torch.ones_like(series, dtype=torch.bool),  # True = real value
         id_mask=torch.zeros_like(series, dtype=torch.int),
         timestamp_seconds=torch.zeros_like(series, dtype=torch.int),
         time_interval_seconds=torch.full((1,), 60, device=device, dtype=torch.int),
     )
 
-    # Prévision probabiliste : num_samples trajectoires, dont on tire les quantiles
+    # Probabilistic forecast: num_samples trajectories, from which we take the quantiles
     t0 = time.perf_counter()
     with torch.inference_mode():
         forecast = forecaster.forecast(
@@ -60,11 +60,11 @@ def main():
         high = forecast.quantile(0.995)[0, 0].cpu().numpy()
     elapsed = time.perf_counter() - t0
 
-    print(f"Échantillons : {tuple(forecast.samples.shape)}  (batch, variables, horizon, num_samples)")
-    print(f"Intervalle [q0.005, q0.995] sur les 5 premiers points :")
+    print(f"Samples: {tuple(forecast.samples.shape)}  (batch, variables, horizon, num_samples)")
+    print(f"Interval [q0.005, q0.995] on the first 5 points:")
     for i in range(5):
-        print(f"  t+{i + 1} : [{low[i]:.2f}, {high[i]:.2f}]")
-    print(f"Temps de la prévision ({args.num_samples} échantillons) : {elapsed * 1000:.0f} ms")
+        print(f"  t+{i + 1}: [{low[i]:.2f}, {high[i]:.2f}]")
+    print(f"Forecast time ({args.num_samples} samples): {elapsed * 1000:.0f} ms")
 
 
 if __name__ == "__main__":

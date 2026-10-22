@@ -1,4 +1,4 @@
-"""Le worker : prend les jobs dans la file par batchs et lance la détection."""
+"""The worker: takes the jobs from the queue in batches and runs the detection."""
 
 import asyncio
 import os
@@ -8,16 +8,16 @@ import numpy as np
 from data import CONTEXT
 from detectors import find_anomalies
 
-# Batching (étape 5.1) : le worker prend jusqu'à BATCH_SIZE jobs, ou ceux arrivés en MAX_WAIT_MS
-# après le premier, et les envoie au modèle en un seul appel
+# Batching (step 5.1): the worker takes up to BATCH_SIZE jobs, or those that arrived within MAX_WAIT_MS
+# of the first one, and sends them to the model in a single call
 BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "16"))
 MAX_WAIT_MS = float(os.environ.get("MAX_WAIT_MS", "50"))
 
 
 def run_detection(detector, series_list):
-    """Le calcul pur : un seul appel au détecteur pour toutes les séries, puis les anomalies de chacune."""
-    histories = np.asarray([s.history[-CONTEXT:] for s in series_list])  # les 1024 derniers points
-    lows, highs = detector.predict_interval_batch(histories)  # (n, 64) chacun
+    """The pure computation: a single detector call for all series, then the anomalies of each one."""
+    histories = np.asarray([s.history[-CONTEXT:] for s in series_list])  # the last 1024 points
+    lows, highs = detector.predict_interval_batch(histories)  # (n, 64) each
     results = []
     for s, low, high in zip(series_list, lows, highs):
         recent = np.asarray(s.recent)
@@ -33,7 +33,7 @@ def run_detection(detector, series_list):
 
 
 async def collect_batch(queue):
-    """Attend un premier job, puis prend ceux qui arrivent dans les MAX_WAIT_MS suivantes (BATCH_SIZE au plus)."""
+    """Waits for a first job, then takes those arriving within the next MAX_WAIT_MS (BATCH_SIZE at most)."""
     batch = [await queue.get()]
     loop = asyncio.get_running_loop()
     deadline = loop.time() + MAX_WAIT_MS / 1000
@@ -42,7 +42,7 @@ async def collect_batch(queue):
         if remaining <= 0:
             break
         try:
-            # Renvoie tout de suite si la file n'est pas vide : sous charge, le batch se remplit sans attendre
+            # Returns immediately if the queue is not empty: under load, the batch fills up without waiting
             batch.append(await asyncio.wait_for(queue.get(), remaining))
         except TimeoutError:
             break
@@ -50,14 +50,14 @@ async def collect_batch(queue):
 
 
 async def run_jobs(detector, group):
-    """Traite des jobs de même méthode en un seul appel au détecteur, puis redécoupe les résultats par job."""
+    """Processes jobs of the same method in a single detector call, then splits the results per job."""
     series = [s for job in group for s in job["series"]]
     try:
         results = await asyncio.to_thread(run_detection, detector, series)
     except Exception as exc:
         for job in group:
             job["status"] = "failed"
-            # Même format que les erreurs de l'API ; le nom de l'exception aide quand str(exc) est vide
+            # Same format as the API errors; the exception name helps when str(exc) is empty
             job["error"] = {"error": "internal_error", "message": f"{type(exc).__name__}: {exc}"}
         return
     start = 0
@@ -69,18 +69,18 @@ async def run_jobs(detector, group):
 
 
 async def worker_loop(queue, jobs, detectors):
-    """Boucle infinie : prend un batch de jobs, les traite, recommence."""
+    """Infinite loop: takes a batch of jobs, processes them, starts again."""
     while True:
         batch = [jobs[job_id] for job_id in await collect_batch(queue)]
-        print(f"Batch de {len(batch)} job(s)")
+        print(f"Batch of {len(batch)} job(s)")
         for job in batch:
             job["status"] = "running"
         try:
-            # Un appel au détecteur par méthode présente dans le batch (toto et/ou baseline)
+            # One detector call per method present in the batch (toto and/or baseline)
             for method, detector in detectors.items():
                 group = [job for job in batch if job["method"] == method]
                 if group:
                     await run_jobs(detector, group)
         finally:
             for _ in batch:
-                queue.task_done()  # signale à la file que ces jobs sont traités
+                queue.task_done()  # tells the queue that these jobs are processed

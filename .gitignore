@@ -6,18 +6,18 @@ __pycache__/
 .mypy_cache/
 .ipynb_checkpoints/
 
-# Environnement virtuel et secrets
+# Virtual environment and secrets
 .venv/
 venv/
 .env
 
-# Données téléchargées (BOOM), régénérables avec src/data.py
+# Downloaded data (BOOM), can be regenerated with src/data.py
 data/
 
-# Sorties brutes de Locust, résumées dans results/loadtest.csv
+# Raw Locust outputs, summarized in results/loadtest.csv
 loadtest/out/
 
-# Divers
+# Misc
 .DS_Store
 .vscode/
 .idea/

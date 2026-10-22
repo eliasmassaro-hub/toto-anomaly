@@ -1,187 +1,187 @@
-# Détection d'incidents sur métriques avec Toto
+# Incident detection on metrics with Toto
 
-Un incident (déploiement buggé, requête lente en base, afflux de trafic) se voit souvent comme un **pic sur une métrique** : taux d'erreur, latence, nombre de requêtes.
-Il faut le repérer **en quelques minutes**, avant les clients, **sans fausses alertes** : trop d'alertes inutiles et l'astreinte finit par les ignorer.
-Ce projet teste [Toto](https://github.com/DataDog/toto), le modèle de prévision open source de Datadog, pour ce cas d'usage. Toto prévoit un intervalle pour les 64 prochains points, et un point qui en sort est une anomalie. Toto est comparé à une méthode simple, puis servi derrière une API asynchrone avec batching, testée en charge.
+An incident (buggy deployment, slow database query, traffic surge) often shows up as a **spike on a metric**: error rate, latency, request count.
+It has to be caught **within minutes**, before customers notice, **without false alarms**: with too many useless alerts, on-call engineers end up ignoring them.
+This project tests [Toto](https://github.com/DataDog/toto), Datadog's open-source forecasting model, for this use case. Toto forecasts an interval for the next 64 points, and a point that falls outside it is an anomaly. Toto is compared to a baseline method, then served behind an asynchronous API with batching and load tested.
 
 ## Architecture
 
 ```
 client (src/client.py, Locust)
-  │   POST /v1/detection-jobs        ──▶ 202 {"job_id"}   (400 si invalide, 429 si file pleine)
-  │   GET  /v1/detection-jobs/{id}   ──▶ 200 {"status", "results"}   (polling jusqu'à done)
+  │   POST /v1/detection-jobs        ──▶ 202 {"job_id"}   (400 if invalid, 429 if the queue is full)
+  │   GET  /v1/detection-jobs/{id}   ──▶ 200 {"status", "results"}   (polling until done)
   ▼
-API FastAPI (src/api.py) ─────── lit ──────▶ stockage des jobs (dictionnaire en mémoire)
+FastAPI API (src/api.py) ─────── reads ─────▶ job storage (in-memory dictionary)
   │ put_nowait(job_id)                                  ▲
-  ▼                                                     │ écrit le statut et les résultats
-file asyncio.Queue (100 jobs au plus)                   │
-  │ jusqu'à BATCH_SIZE jobs, ou ceux arrivés en MAX_WAIT_MS
+  ▼                                                     │ writes the status and results
+asyncio.Queue (100 jobs at most)                        │
+  │ up to BATCH_SIZE jobs, or those that arrived within MAX_WAIT_MS
   ▼                                                     │
 worker (src/worker.py) ─────────────────────────────────┘
-  │ un appel au modèle par batch, dans asyncio.to_thread (l'API reste réactive)
+  │ one model call per batch, in asyncio.to_thread (the API stays responsive)
   ▼
-Toto ou méthode simple (src/detectors.py), chargés une seule fois au démarrage
+Toto or baseline (src/detectors.py), loaded only once at startup
 ```
 
-Le contrat de l'API (endpoints, JSON, codes de statut, format d'erreur) est dans [`docs/api_spec.md`](docs/api_spec.md).
+The API contract (endpoints, JSON, status codes, error format) is in [`docs/api_spec.md`](docs/api_spec.md).
 
-## Lancer le projet
+## Running the project
 
-Installation (Python 3.12) :
+Setup (Python 3.12):
 
 ```
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-python src/data.py           # télécharge 200 séries BOOM dans data/series.npz
-python src/check_toto.py     # vérifie que Toto se charge et prévoit
+python src/data.py           # downloads 200 BOOM series to data/series.npz
+python src/check_toto.py     # checks that Toto loads and forecasts
 ```
 
-Évaluation hors API :
+Evaluation outside the API:
 
 ```
-python src/evaluate.py                  # comparaison brute, results/eval.csv (~10 min sur CPU)
-python src/tuning.py                    # réglages sur la validation, résultats sur le test (~15 min)
-python src/plot_detectors.py --index 42 # figure d'une série, results/series_42_detectors.png
+python src/evaluate.py                  # raw comparison, results/eval.csv (~10 min on CPU)
+python src/tuning.py                    # tuning on the validation set, results on the test set (~15 min)
+python src/plot_detectors.py --index 42 # figure of one series, results/series_42_detectors.png
 ```
 
-API, dans deux terminaux :
+API, in two terminals:
 
 ```
 uvicorn api:app --app-dir src
 python src/client.py --index 42 --method toto
 ```
 
-La documentation interactive est sur `http://localhost:8000/docs`. Les variables d'environnement `BATCH_SIZE` (16), `MAX_WAIT_MS` (50) et `TOTO_SAMPLES` (256) règlent le worker. Pour le test de charge, voir [plus bas](#test-de-charge).
+The interactive documentation is at `http://localhost:8000/docs`. The environment variables `BATCH_SIZE` (16), `MAX_WAIT_MS` (50) and `TOTO_SAMPLES` (256) configure the worker. For the load test, see [below](#load-test).
 
-| Fichier | Rôle |
+| File | Role |
 |---|---|
-| `src/data.py` | chargement de BOOM, découpage historique / futur, injection de pics |
-| `src/detectors.py` | méthode simple et Toto, avec la même interface `predict_interval(_batch)` |
-| `src/evaluate.py`, `src/tuning.py` | métriques, réglages sur la validation, résultats sur le test |
-| `src/api.py`, `src/schemas.py`, `src/worker.py` | API, validation des requêtes, worker avec batching |
-| `src/client.py`, `loadtest/locustfile.py` | client de démonstration, test de charge |
+| `src/data.py` | BOOM loading, history / future split, spike injection |
+| `src/detectors.py` | baseline and Toto, with the same `predict_interval(_batch)` interface |
+| `src/evaluate.py`, `src/tuning.py` | metrics, tuning on the validation set, results on the test set |
+| `src/api.py`, `src/schemas.py`, `src/worker.py` | API, request validation, worker with batching |
+| `src/client.py`, `loadtest/locustfile.py` | demo client, load test |
 
-## Méthode d'évaluation
+## Evaluation method
 
-**Données.** 200 vraies séries du dataset [BOOM](https://huggingface.co/datasets/Datadog/BOOM) (métriques d'observabilité de Datadog), avec une seule variable par série. Chaque série est découpée en un historique de 1024 points et un futur de 64 points. Les incidents sont simulés : 3 pics sont ajoutés dans le futur, de hauteur 5 × l'écart-type de l'historique, à des positions tirées au hasard (seed `i` pour la série `i`).
+**Data.** 200 real series from the [BOOM](https://huggingface.co/datasets/Datadog/BOOM) dataset (Datadog observability metrics), with a single variable per series. Each series is split into a history of 1024 points and a future of 64 points. Incidents are simulated: 3 spikes are added to the future, of height 5 × the standard deviation of the history, at random positions (seed `i` for series `i`).
 
-**Détecteurs.**
-- **Méthode simple** : médiane ± k × 1,4826 × MAD des 200 derniers points, soit un intervalle constant sur les 64 points.
-- **Toto** (`Datadog/Toto-Open-Base-1.0`) : quantiles d'un niveau donné sur `num_samples` trajectoires prévues.
+**Detectors.**
+- **Baseline**: median ± k × 1.4826 × MAD of the last 200 points, i.e. a constant interval over the 64 points.
+- **Toto** (`Datadog/Toto-Open-Base-1.0`): quantiles of a given level over `num_samples` forecast trajectories.
 
-Un point du futur hors de l'intervalle est signalé.
+A future point outside the interval is flagged.
 
-**Métriques.** Un point signalé est un vrai positif (TP) s'il s'agit d'un pic injecté, et une fausse alerte (FP) sinon.
+**Metrics.** A flagged point is a true positive (TP) if it is an injected spike, and a false alarm (FP) otherwise.
 
-| Métrique | Définition |
+| Metric | Definition |
 |---|---|
-| Rappel | TP / pics injectés |
-| Précision | TP / (TP + FP), sur les totaux de toutes les séries |
-| F1 | 2 × précision × rappel / (précision + rappel) |
-| Fausses alertes / série | FP / nombre de séries |
-| ms / série | temps de calcul moyen, après un appel d'échauffement |
+| Recall | TP / injected spikes |
+| Precision | TP / (TP + FP), on the totals over all series |
+| F1 | 2 × precision × recall / (precision + recall) |
+| False alarms / series | FP / number of series |
+| ms / series | mean computation time, after a warm-up call |
 
-**Validation et test.** Les 200 séries sont coupées en deux moitiés de 100, tirées au hasard avec une seed fixe. Les réglages sont choisis **uniquement sur la validation**, et les résultats sont annoncés **uniquement sur le test** :
-- **niveau de l'intervalle de Toto** : 99 %, qui maximise le F1 de validation (0,626, contre 0,616 à 98 % et 0,618 à 99,5 %) ;
-- **nombre de tirages** : 256, le plus petit dont le F1 est à moins de 0,01 du meilleur (128 tirages est à 0,02) ;
-- **`k` de la méthode simple** : 18,5, choisi pour avoir autant de fausses alertes que Toto sur la validation (2,62 par série).
+**Validation and test.** The 200 series are split into two random halves of 100, with a fixed seed. Settings are chosen **only on the validation set**, and results are reported **only on the test set**:
+- **Toto interval level**: 99%, which maximizes the validation F1 (0.626, against 0.616 at 98% and 0.618 at 99.5%);
+- **number of samples**: 256, the smallest whose F1 is within 0.01 of the best (128 samples is 0.02 below);
+- **baseline `k`**: 18.5, chosen to get as many false alarms as Toto on the validation set (2.62 per series).
 
-## Résultats
+## Results
 
-### Qualité de détection, sur le test (100 séries, 300 pics)
+### Detection quality, on the test set (100 series, 300 spikes)
 
-| Détecteur | Rappel | Précision | F1 | Fausses alertes / série | ms / série |
+| Detector | Recall | Precision | F1 | False alarms / series | ms / series |
 |---|---|---|---|---|---|
-| Méthode simple, k = 3 (réglage par défaut) | 98,0 % | 20,9 % | 0,344 | 11,2 | 0,03 |
-| Méthode simple, k = 18,5 (fausses alertes égales sur la validation) | 44,7 % | 44,5 % | 0,446 | 1,7 | 0,03 |
-| Toto réglé (niveau 99 %, 256 tirages) | **85,3 %** | **46,5 %** | **0,602** | 3,0 | 2269 |
+| Baseline, k = 3 (default setting) | 98.0% | 20.9% | 0.344 | 11.2 | 0.03 |
+| Baseline, k = 18.5 (equal false alarms on the validation set) | 44.7% | 44.5% | 0.446 | 1.7 | 0.03 |
+| Tuned Toto (99% level, 256 samples) | **85.3%** | **46.5%** | **0.602** | 3.0 | 2269 |
 
-Source : [`results/eval_test.csv`](results/eval_test.csv). Le `k` est réglé sur la validation, si bien que sur le test la méthode simple fait un peu moins de fausses alertes que Toto (1,7 contre 3,0 par série).
+Source: [`results/eval_test.csv`](results/eval_test.csv). Since `k` is tuned on the validation set, the baseline makes slightly fewer false alarms than Toto on the test set (1.7 against 3.0 per series).
 
-### Rappel en fonction des fausses alertes (validation)
+### Recall as a function of false alarms (validation)
 
-![Rappel en fonction des fausses alertes par série](results/recall_vs_false_alarms.png)
+![Recall as a function of false alarms per series](results/recall_vs_false_alarms.png)
 
-Chaque point est un réglage : une valeur de `k` pour la méthode simple, un niveau d'intervalle pour Toto. À nombre de fausses alertes égal, la courbe la plus haute est la meilleure. La courbe de Toto est au-dessus sur toute la plage commune. Au réglage retenu (2,62 fausses alertes par série), **Toto détecte 82 % des pics, contre 41 % pour la méthode simple**.
+Each point is a setting: a value of `k` for the baseline, an interval level for Toto. At an equal number of false alarms, the highest curve is the best. Toto's curve is above over the whole common range. At the chosen setting (2.62 false alarms per series), **Toto detects 82% of the spikes, against 41% for the baseline**.
 
-### Exemples de séries
+### Example series
 
-Ces figures utilisent les réglages par défaut (k = 3, 256 tirages), pas le `k` réglé.
+These figures use the default settings (k = 3, 256 samples), not the tuned `k`.
 
-**Série cyclique** (`ds-277-T`). L'intervalle de Toto suit le cycle. Celui de la méthode simple doit couvrir tout le cycle, et ne détecte ici les pics que parce qu'ils dépassent le haut du cycle.
+**Cyclic series** (`ds-277-T`). Toto's interval follows the cycle. The baseline interval has to cover the whole cycle, and only detects the spikes here because they go above the top of the cycle.
 
-![Série ds-277-T](results/series_0_detectors.png)
+![Series ds-277-T](results/series_0_detectors.png)
 
-**Hausse réelle dans le futur** (`ds-1493-10S`). La méthode simple signale toute la hausse (36 fausses alertes). L'intervalle de Toto s'élargit au moment de la hausse, ce qui donne 0 fausse alerte, mais il rate un des trois pics.
+**Real rise in the future** (`ds-1493-10S`). The baseline flags the whole rise (36 false alarms). Toto's interval widens when the rise happens, which gives 0 false alarms, but it misses one of the three spikes.
 
-![Série ds-1493-10S](results/series_42_detectors.png)
+![Series ds-1493-10S](results/series_42_detectors.png)
 
-**Cas où Toto échoue** (`ds-1419-10S`). Toto prévoit un intervalle très large et rate les trois pics, que la méthode simple détecte.
+**A case where Toto fails** (`ds-1419-10S`). Toto forecasts a very wide interval and misses all three spikes, which the baseline detects.
 
-![Série ds-1419-10S](results/series_150_detectors.png)
+![Series ds-1419-10S](results/series_150_detectors.png)
 
-D'autres séries sont dans [`results/`](results/).
+More series are in [`results/`](results/).
 
-### Test de charge
+### Load test
 
-**Le choix du nombre de tirages.** Le worker regroupe jusqu'à `BATCH_SIZE` jobs et les envoie à Toto en un seul appel. Toto duplique chaque série `num_samples` fois dans son batch interne. Pour qu'un batch de 16 jobs passe vraiment en un seul appel, il faut donc `16 × num_samples ≤ max_samples_per_call`.
+**Choosing the number of samples.** The worker groups up to `BATCH_SIZE` jobs and sends them to Toto in a single call. Toto duplicates each series `num_samples` times in its internal batch. For a batch of 16 jobs to really go through in a single call, `16 × num_samples ≤ max_samples_per_call` is therefore needed.
 
-Avec 256 tirages, il faudrait 4096 lignes par appel : sur CPU (16 Go), la machine swappe et l'appel devient environ 10 fois plus lent. Avec `max_samples_per_call = 512`, un batch de 16 séries est découpé en 8 appels de 2 séries, et le batching ne sert plus à rien. Mesure sur 16 séries, en régime établi :
+With 256 samples, that would be 4096 rows per call: on CPU (16 GB), the machine swaps and the call becomes about 10 times slower. With `max_samples_per_call = 512`, a batch of 16 series is split into 8 calls of 2 series, and batching no longer helps. Measured on 16 series, in steady state:
 
-| Tirages | Une série par appel | 16 séries d'un coup | Appels pour 16 séries |
+| Samples | One series per call | 16 series at once | Calls for 16 series |
 |---|---|---|---|
-| 32 | 440 ms / série | 318 ms / série | 1 |
-| 256 | 2865 ms / série | 2956 ms / série | 8 |
+| 32 | 440 ms / series | 318 ms / series | 1 |
+| 256 | 2865 ms / series | 2956 ms / series | 8 |
 
-**Le test de charge utilise donc `TOTO_SAMPLES=32`.** On a alors 16 × 32 = 512 tirages, soit un seul appel par batch. Le prix à payer est la qualité : sur la validation, le F1 passe de 0,61 à 0,48 (`results/tuning_toto_samples.csv`). Par défaut, l'API garde 256 tirages. Sur GPU, on garderait 256 tirages et on monterait `max_samples_per_call` à 4096.
+**The load test therefore uses `TOTO_SAMPLES=32`.** That gives 16 × 32 = 512 samples, i.e. a single call per batch. The price is quality: on the validation set, F1 drops from 0.61 to 0.48 (`results/tuning_toto_samples.csv`). By default, the API keeps 256 samples. On GPU, we would keep 256 samples and raise `max_samples_per_call` to 4096.
 
-**Lancer le test.** Terminal 1, le serveur (refaire avec `BATCH_SIZE=16`) :
+**Running the test.** Terminal 1, the server (run again with `BATCH_SIZE=16`):
 
 ```
 BATCH_SIZE=1 TOTO_SAMPLES=32 uvicorn api:app --app-dir src --no-access-log
 ```
 
-Terminal 2, Locust avec 32 utilisateurs pendant 3 minutes :
+Terminal 2, Locust with 32 users for 3 minutes:
 
 ```
 locust -f loadtest/locustfile.py --host http://localhost:8000 --headless -u 32 -r 32 -t 3m --csv loadtest/out/batch1
 ```
 
-Une fois les deux tests passés, `python loadtest/summarize.py` écrit [`results/loadtest.csv`](results/loadtest.csv).
+Once both tests are done, `python loadtest/summarize.py` writes [`results/loadtest.csv`](results/loadtest.csv).
 
-**Résultats.** Toto (32 tirages, niveau 99 %) sur CPU (MacBook Air, 16 Go). Chaque job contient une série, et chaque utilisateur enchaîne les jobs sans pause.
+**Results.** Toto (32 samples, 99% level) on CPU (MacBook Air, 16 GB). Each job contains one series, and each user sends jobs back to back without pausing.
 
-| Batch | Séries / s | Latence p50 (bout en bout) | Latence p95 (bout en bout) | Jobs terminés |
+| Batch | Series / s | p50 latency (end-to-end) | p95 latency (end-to-end) | Completed jobs |
 |---|---|---|---|---|
-| 1 | 2,67 | 12 s | 14 s | 478 |
-| 16 | 3,04 | 10 s | 12 s | 544 |
+| 1 | 2.67 | 12 s | 14 s | 478 |
+| 16 | 3.04 | 10 s | 12 s | 544 |
 
-- **Débit : +14 %.** Avec `BATCH_SIZE=16`, les 35 batchs étaient tous pleins. Le gain reste modeste, car sur CPU le modèle est déjà presque saturé par les tirages de chaque série. Sur GPU, un batch plus gros occuperait des cœurs inutilisés, et le gain serait bien plus grand.
-- **Latence : −2 s.** Ici, la latence est surtout de l'attente dans la file. Avec 32 utilisateurs, la loi de Little donne latence ≈ utilisateurs / débit, soit 32 / 2,67 ≈ 12 s et 32 / 3,04 ≈ 10,5 s, ce qui correspond aux mesures. Le batching réduit la latence parce qu'il augmente le débit. À faible charge, ce serait l'inverse : un job attendrait jusqu'à `MAX_WAIT_MS`, puis la fin de tout son batch.
-- **Aucun échec**, aucun `429` : la file (100 jobs) n'a jamais été pleine avec 32 utilisateurs.
+- **Throughput: +14%.** With `BATCH_SIZE=16`, all 35 batches were full. The gain stays modest, because on CPU the model is already almost saturated by the samples of each series. On GPU, a bigger batch would use otherwise idle cores, and the gain would be much larger.
+- **Latency: −2 s.** Here, latency is mostly waiting in the queue. With 32 users, Little's law gives latency ≈ users / throughput, i.e. 32 / 2.67 ≈ 12 s and 32 / 3.04 ≈ 10.5 s, which matches the measurements. Batching reduces latency because it increases throughput. Under low load, it would be the opposite: a job would wait up to `MAX_WAIT_MS`, then for its whole batch to finish.
+- **No failures**, no `429`: the queue (100 jobs) was never full with 32 users.
 
 ## Conclusion
 
-- **À fausses alertes égales, Toto est nettement meilleur.** Sur la validation, il détecte 82 % des pics contre 41 % pour la méthode simple. Sur le test, son F1 est de 0,60, contre 0,45 pour la méthode simple réglée et 0,34 pour la méthode simple par défaut. La différence vient de l'intervalle : celui de Toto suit les cycles et le niveau de la série, alors que celui de la méthode simple est plat.
-- **Mais Toto coûte beaucoup plus cher.** Il faut environ 2,3 s par série sur CPU avec 256 tirages, contre 0,03 ms pour la méthode simple, soit à peu près 70 000 fois plus. Moins de tirages réduit le coût mais aussi la qualité : avec 32 tirages, le calcul est 7 fois plus rapide, mais le F1 de validation passe de 0,61 à 0,48. Le batching ne rattrape que 14 % sur CPU.
-- **Une cascade combinerait les deux.** La méthode simple, avec un `k` bas (k = 3 détecte 98 % des pics), filtrerait toutes les séries à chaque instant. Toto ne traiterait que les séries suspectes, pour éliminer leurs fausses alertes. Le coût de Toto deviendrait alors proportionnel à la part de séries suspectes, faible en production où la plupart des séries sont normales la plupart du temps. Dans ce benchmark, au contraire, chaque série contient des pics : la cascade n'y ferait rien gagner, il faudrait la mesurer sur des données plus réalistes. Son rappel serait aussi limité par celui du filtre.
+- **At equal false alarms, Toto is clearly better.** On the validation set, it detects 82% of the spikes against 41% for the baseline. On the test set, its F1 is 0.60, against 0.45 for the tuned baseline and 0.34 for the default baseline. The difference comes from the interval: Toto's follows the cycles and the level of the series, whereas the baseline's is flat.
+- **But Toto is much more expensive.** It takes about 2.3 s per series on CPU with 256 samples, against 0.03 ms for the baseline, i.e. roughly 70,000 times more. Fewer samples reduce the cost but also the quality: with 32 samples, the computation is 7 times faster, but the validation F1 drops from 0.61 to 0.48. Batching only recovers 14% on CPU.
+- **A cascade would combine both.** The baseline, with a low `k` (k = 3 detects 98% of the spikes), would filter all series at every point in time. Toto would only process the suspicious series, to remove their false alarms. Toto's cost would then be proportional to the share of suspicious series, which is small in production, where most series are normal most of the time. In this benchmark, on the contrary, every series contains spikes: the cascade would not save anything here, it would need to be measured on more realistic data. Its recall would also be capped by that of the filter.
 
-## Limites
+## Limitations
 
-- **Incidents simulés.** Les pics sont injectés sur de vraies séries. Ils ne couvrent ni les changements de niveau, ni les dérives lentes, ni les chutes à zéro. Une hauteur de 5 écarts-types reste un cas plutôt facile.
-- **Anomalies réelles non étiquetées.** Une vraie anomalie présente dans le futur compte comme fausse alerte, comme la hausse de `ds-1493-10S`.
-- **Les deux faiblesses de la méthode simple, gardées volontairement :**
-  - **Intervalle plat** : il ne suit pas les cycles, peut rater un pic posé dans un creux et signale les sauts réguliers comme anomalies.
-  - **MAD nulle** : sur une série presque constante (par exemple `ds-1525-5T`), la MAD vaut 0 et l'intervalle aurait une largeur nulle. On la remplace alors par l'écart-type de la fenêtre.
-- **Toto est aléatoire.** Ses tirages changent d'un lancement à l'autre, et donc parfois les points signalés. Il peut aussi prévoir un intervalle très large et ne rien détecter (`ds-1419-10S`).
-- **100 séries de test.** Des écarts de quelques points de rappel ou de précision ne sont pas significatifs.
-- **API de démonstration.** Jobs en mémoire, un seul worker, pas d'authentification (voir les limites dans [`docs/api_spec.md`](docs/api_spec.md)). Le test de charge utilise 32 tirages et non 256.
+- **Simulated incidents.** The spikes are injected into real series. They cover neither level shifts, nor slow drifts, nor drops to zero. A height of 5 standard deviations is a fairly easy case.
+- **Unlabeled real anomalies.** A real anomaly in the future counts as a false alarm, like the rise in `ds-1493-10S`.
+- **The two weaknesses of the baseline, kept on purpose:**
+  - **Flat interval**: it does not follow cycles, can miss a spike placed in a trough, and flags regular jumps as anomalies.
+  - **Zero MAD**: on an almost constant series (for example `ds-1525-5T`), the MAD is 0 and the interval would have zero width. It is then replaced by the standard deviation of the window.
+- **Toto is random.** Its samples change from one run to the next, and so do the flagged points sometimes. It can also forecast a very wide interval and detect nothing (`ds-1419-10S`).
+- **100 test series.** Differences of a few points of recall or precision are not significant.
+- **Demo API.** In-memory jobs, a single worker, no authentication (see the limitations in [`docs/api_spec.md`](docs/api_spec.md)). The load test uses 32 samples, not 256.
 
-## À l'échelle de Datadog
+## At Datadog scale
 
-**File et stockage.** La file en mémoire serait remplacée par **Kafka**, qui conserve les points même si un worker tombe et permet de rejouer un flux. Les séries y seraient **partitionnées par identifiant**, si bien que tous les points d'une série arrivent dans l'ordre au même worker, qui peut garder son historique à portée de main. Le dictionnaire des jobs deviendrait un **stockage persistant** (Redis avec une durée de vie, ou une base de données), partagé par toutes les instances de l'API.
+**Queue and storage.** The in-memory queue would be replaced by **Kafka**, which keeps the points even if a worker goes down and allows a stream to be replayed. The series would be **partitioned by identifier**, so that all the points of a series arrive in order at the same worker, which can keep its history at hand. The job dictionary would become **persistent storage** (Redis with a time to live, or a database), shared by all the API instances.
 
-**Inférence et workers.** L'inférence se ferait sur **GPU avec de gros batchs**. C'est là que le batching paie : 256 tirages × des dizaines de séries par appel, là où le CPU sature déjà. Les **workers seraient sans état et répliqués horizontalement** (un groupe de consommateurs Kafka), et on en ajouterait automatiquement quand le retard de la file augmente.
+**Inference and workers.** Inference would run on **GPU with large batches**. This is where batching pays off: 256 samples × dozens of series per call, where the CPU is already saturated. **Workers would be stateless and replicated horizontally** (a Kafka consumer group), with more added automatically when the queue lag grows.
 
-**Coût.** La cascade réserverait le GPU aux séries suspectées par la méthode simple.
+**Cost.** The cascade would reserve the GPU for the series flagged as suspicious by the baseline.

@@ -1,8 +1,8 @@
-"""Étape 2 : détecteurs d'anomalies (méthode simple et Toto).
+"""Step 2: anomaly detectors (baseline method and Toto).
 
-Interface commune : predict_interval(history) -> (low, high), deux tableaux de HORIZON points,
-et predict_interval_batch(histories) pour plusieurs séries d'un coup (utilisé par le worker de l'API).
-Un point du futur hors de [low, high] est une anomalie (voir find_anomalies).
+Common interface: predict_interval(history) -> (low, high), two arrays of HORIZON points,
+and predict_interval_batch(histories) for several series at once (used by the API worker).
+A future point outside [low, high] is an anomaly (see find_anomalies).
 """
 
 import numpy as np
@@ -13,11 +13,11 @@ from toto.model.toto import Toto
 
 from data import HORIZON
 
-MAD_TO_STD = 1.4826  # pour une loi normale, 1,4826 × MAD estime l'écart-type
+MAD_TO_STD = 1.4826  # for a normal distribution, 1.4826 × MAD estimates the standard deviation
 
 
 class BaselineDetector:
-    """Méthode simple : intervalle constant = médiane ± k × 1,4826 × MAD des window derniers points."""
+    """Baseline method: constant interval = median ± k × 1.4826 × MAD of the last window points."""
 
     def __init__(self, window=200, k=3):
         self.window = window
@@ -28,44 +28,43 @@ class BaselineDetector:
         median = np.median(recent)
         scale = MAD_TO_STD * np.median(np.abs(recent - median))
         if scale == 0:
-            # MAD nulle (plus de la moitié des points sont égaux) : on prend l'écart-type,
-            # avec un minimum de 1e-6 si la fenêtre est entièrement constante
+            # Zero MAD (more than half of the points are equal): we use the standard deviation,
+            # with a minimum of 1e-6 if the window is entirely constant
             scale = max(np.std(recent), 1e-6)
-        # Intervalle plat : il ne suit pas les cycles de la série (faiblesse voulue de la méthode)
+        # Flat interval: it does not follow the cycles of the series (a deliberate weakness of the method)
         low = np.full(HORIZON, median - self.k * scale)
         high = np.full(HORIZON, median + self.k * scale)
         return low, high
 
     def predict_interval_batch(self, histories):
-        """Même interface que TotoDetector : low et high de forme (n, HORIZON). Le calcul est instantané,
-        une boucle suffit."""
+        """Same interface as TotoDetector: low and high of shape (n, HORIZON). The computation is instant,
+        a loop is enough."""
         intervals = [self.predict_interval(history) for history in histories]
         return np.array([low for low, _ in intervals]), np.array([high for _, high in intervals])
 
 
 def find_anomalies(future, low, high):
-    """Positions des points de future hors de [low, high]."""
+    """Positions of the future points outside [low, high]."""
     future = np.asarray(future)
     return np.flatnonzero((future < low) | (future > high))
 
 
 class TotoDetector:
-    """Intervalle de Toto : quantiles d'un niveau donné sur num_samples trajectoires prévues."""
+    """Toto interval: quantiles of a given level over num_samples forecast trajectories."""
 
     MODEL_ID = "Datadog/Toto-Open-Base-1.0"
 
     def __init__(self, num_samples=256, level=0.99, max_samples_per_call=512, device=None):
         self.num_samples = num_samples
-        # Intervalle centré de niveau level : level = 0,99 donne les quantiles 0,005 et 0,995
+        # Centered interval of the given level: level = 0.99 gives the 0.005 and 0.995 quantiles
         self.low_q = (1 - level) / 2
         self.high_q = 1 - self.low_q
-        # Chaque série est dupliquée num_samples fois dans le batch du modèle : on limite le
-        # nombre de séries × échantillons par appel pour borner la mémoire. Sur CPU (16 Go),
-        # 512 utilise ~5 Go ; à 4096 la machine swappe et l'appel devient 10 fois plus lent.
-        # Sur GPU, on peut augmenter cette valeur.
+        # Each series is duplicated num_samples times in the model batch: we cap the number of
+        # series × samples per call to bound memory. On CPU (16 GB), 512 uses ~5 GB; at 4096
+        # the machine swaps and the call becomes 10 times slower. On GPU, this value can be raised.
         self.max_samples_per_call = max_samples_per_call
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        # Chargement unique du modèle (téléchargé depuis Hugging Face au premier lancement)
+        # The model is loaded once (downloaded from Hugging Face on the first run)
         toto = Toto.from_pretrained(self.MODEL_ID).to(self.device)
         toto.eval()
         self.forecaster = TotoForecaster(toto.model)
@@ -75,27 +74,27 @@ class TotoDetector:
         return low[0], high[0]
 
     def predict_interval_batch(self, histories):
-        """Intervalles de plusieurs séries de même longueur ; renvoie low et high de forme (n, HORIZON)."""
+        """Intervals of several series of the same length; returns low and high of shape (n, HORIZON)."""
         samples = self.predict_samples_batch(histories)
         low, high = np.quantile(samples, [self.low_q, self.high_q], axis=-1)
         return low, high
 
     def predict_samples_batch(self, histories):
-        """Tirages de Toto à l'échelle d'origine, de forme (n, HORIZON, num_samples).
+        """Toto samples at the original scale, of shape (n, HORIZON, num_samples).
 
-        Un seul appel au modèle tant que n × num_samples <= max_samples_per_call, sinon
-        les séries sont découpées en paquets.
+        A single model call as long as n × num_samples <= max_samples_per_call, otherwise
+        the series are split into chunks.
         """
         histories = np.asarray(histories, dtype=np.float64)
         if histories.ndim != 2:
-            raise ValueError(f"histories doit être de forme (n, longueur), reçu {histories.shape}")
+            raise ValueError(f"histories must have shape (n, length), got {histories.shape}")
 
-        # Normalisation de chaque série : le normaliseur interne de Toto a une échelle minimale
-        # qui le rend aveugle sur les séries très plates (écart-type ~1e-5, il y en a dans BOOM).
-        # On prévoit donc (history - moyenne) / écart-type, puis on remet les tirages à l'échelle.
+        # Per-series normalization: Toto's internal scaler has a minimum scale that makes it
+        # blind on very flat series (standard deviation ~1e-5, BOOM has some). We therefore
+        # forecast (history - mean) / std, then rescale the samples.
         mean = histories.mean(axis=1, keepdims=True)
         std = histories.std(axis=1, keepdims=True)
-        std = np.where(std > 0, std, 1.0)  # série constante : pas de division
+        std = np.where(std > 0, std, 1.0)  # constant series: no division
         scaled = ((histories - mean) / std).astype(np.float32)
 
         chunk = max(1, self.max_samples_per_call // self.num_samples)
@@ -105,14 +104,14 @@ class TotoDetector:
         return samples * std[:, :, None] + mean[:, :, None]
 
     def _sample_chunk(self, histories):
-        """Un appel au modèle pour un paquet de séries de forme (n, longueur)."""
-        # Toto attend (batch, variables, temps) : ici une seule variable par série
+        """One model call for a chunk of series of shape (n, length)."""
+        # Toto expects (batch, variables, time): here a single variable per series
         series = torch.from_numpy(histories).to(self.device).unsqueeze(1)
         n = series.shape[0]
-        # Même construction que dans check_toto.py : timestamps non utilisés par le modèle
+        # Same construction as in check_toto.py: timestamps are not used by the model
         inputs = MaskedTimeseries(
             series=series,
-            padding_mask=torch.ones_like(series, dtype=torch.bool),  # True = vraie valeur
+            padding_mask=torch.ones_like(series, dtype=torch.bool),  # True = real value
             id_mask=torch.zeros_like(series, dtype=torch.int),
             timestamp_seconds=torch.zeros_like(series, dtype=torch.int),
             time_interval_seconds=torch.full((n, 1), 60, device=self.device, dtype=torch.int),
@@ -123,7 +122,7 @@ class TotoDetector:
                 prediction_length=HORIZON,
                 num_samples=self.num_samples,
                 samples_per_batch=self.num_samples,
-                use_kv_cache=False,  # un seul patch à prévoir : le cache ne sert pas et coûte de la mémoire
+                use_kv_cache=False,  # a single patch to forecast: the cache is useless and costs memory
             )
-        # samples : (n, 1, HORIZON, num_samples) -> (n, HORIZON, num_samples)
+        # samples: (n, 1, HORIZON, num_samples) -> (n, HORIZON, num_samples)
         return forecast.samples[:, 0].cpu().numpy()
