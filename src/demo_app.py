@@ -52,6 +52,36 @@ LEGEND_LABELS = {
 JOB_STATUSES = {"pending": "En attente", "running": "En cours"}
 TOTO_SAMPLES_TUNED = 256  # number of Toto samples chosen in step 3.8
 FA = "False alarms / series"  # column of the results tables
+LOADTEST_USERS = 32  # simulated users of the load test (step 5.3)
+
+# Order-of-magnitude assumptions of the "Sous le capot" tab, deliberately simple
+FLEET_SERIES = 1_000_000  # series to monitor
+CHECK_INTERVAL_S = 5 * 60  # each series is checked every 5 minutes
+CASCADE_DISCARDED = 0.95  # share of series that the baseline rules out before Toto
+
+# Main chain from left to right; the job storage sits under the queue, linked to the API and the worker.
+# Streamlit's CSS forces a small font in the diagram, and the diagram is stretched to the page width:
+# a compact layout (small font, small gaps) is what makes the text big on screen.
+ARCHITECTURE_DOT = """
+digraph {
+    rankdir=LR;
+    nodesep=0.15;
+    ranksep=0.25;
+    node [shape=box, style="rounded,filled", fillcolor="#f4f4f1", color="#c3c2b7", fontname="Helvetica",
+          fontsize=10, margin="0.08,0.04", height=0.3];
+    edge [color="#52514e", arrowsize=0.8];
+    client [label="Client\\n(page de démo)"];
+    api [label="API\\n(FastAPI)"];
+    queue [label="File d'attente"];
+    worker [label="Worker\\n(traitement par lots)"];
+    toto [label="Toto", fillcolor="#e3e9fa", color="#2F5FD0"];
+    storage [label="Stockage des jobs\\n(statuts et résultats)", shape=cylinder];
+    client -> api -> queue -> worker -> toto;
+    {rank=same; queue; storage;}
+    api -> storage [dir=both];
+    worker -> storage [dir=back];
+}
+"""
 
 
 @st.cache_data
@@ -81,6 +111,13 @@ def fr(x, digits=1):
 def pct(x):
     """A share written as a French percentage: 0.8213 -> "82 %" (non-breaking space)."""
     return f"{100 * x:.0f} %"
+
+
+def approx(x):
+    """x rounded to 2 significant digits, with French thousands separators: 72505 -> "73 000"."""
+    digits = 1 - int(np.floor(np.log10(abs(x))))  # decimals to keep (negative: round to tens, hundreds...)
+    rounded = round(x, digits)
+    return f"{rounded:,.0f}".replace(",", " ") if digits <= 0 else fr(rounded, digits)
 
 
 def api_is_up():
@@ -279,6 +316,44 @@ def render_results_tab():
     st.caption("Réglages choisis sur 100 séries, résultats vérifiés sur 100 autres séries jamais vues.")
 
 
+# --- Under the hood tab ---
+
+def render_inside_tab():
+    st.subheader("L'architecture")
+    st.graphviz_chart(ARCHITECTURE_DOT)
+
+    final = load_csv("eval_test.csv")
+    toto_ms = final.loc[final["Detector"].str.startswith("Tuned Toto"), "ms / series"].item()
+    baseline_ms = final.loc[final["Detector"].str.contains("default"), "ms / series"].item()
+    loadtest = load_csv("loadtest.csv").set_index("Batch")["Series / s"]
+    batched = loadtest[loadtest.index.max()]  # series per second with the biggest batch (16)
+
+    st.subheader("Les chiffres")
+    figures = {
+        "Coût de Toto par rapport à la méthode classique": f"≈ {approx(toto_ms / baseline_ms)}×",
+        "Gain de débit grâce aux lots": f"+{pct(batched / loadtest[1] - 1)}",
+        f"Débit sous {LOADTEST_USERS} clients simultanés": f"{fr(batched)} séries/s",
+    }
+    # Bottom alignment: the numbers stay on one line even when a label wraps
+    for col, (label, value) in zip(st.columns(3, vertical_alignment="bottom"), figures.items()):
+        with col:
+            st.markdown(label)  # above the number rather than as its label, so that it can wrap
+            st.metric(label, value, label_visibility="collapsed")
+
+    st.subheader("Et à grande échelle ?")
+    needed = FLEET_SERIES / CHECK_INTERVAL_S  # series per second
+    machines = needed / batched
+    st.markdown(
+        f"{FLEET_SERIES / 1e6:g} million de séries toutes les {CHECK_INTERVAL_S // 60} minutes "
+        f"= environ {approx(needed)} séries/s  \n"
+        f"→ environ {approx(machines)} machines CPU à ce débit  \n"
+        f"→ environ {approx(machines * (1 - CASCADE_DISCARDED))} avec une cascade où la méthode classique "
+        f"écarte {pct(CASCADE_DISCARDED)} des séries."
+    )
+    st.caption("Ordre de grandeur, avec des hypothèses volontairement simples. Le débit vient du test de charge, "
+               "avec une version allégée de Toto, sur un ordinateur portable.")
+
+
 # --- Page ---
 
 st.set_page_config(page_title="Détection d'incidents avec Toto", layout="wide")
@@ -298,6 +373,8 @@ with live_tab:
     render_live_tab(api_up)
 with results_tab:
     render_results_tab()
+with inside_tab:
+    render_inside_tab()
 
 st.divider()
 st.caption("Données : dataset public BOOM (Datadog). Modèle : Toto, open source (Datadog AI Research).")
