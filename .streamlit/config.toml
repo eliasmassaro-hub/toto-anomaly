@@ -1,0 +1,14 @@
+# Streamlit settings for the demo page (read when running `streamlit run` from the repository root)
+
+[server]
+headless = true  # no email prompt on the first run and no automatic browser tab: open the printed URL
+address = "localhost"  # the page is only reachable from this computer
+
+[client]
+toolbarMode = "minimal"  # hides the Deploy button and the developer menu
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+base = "light"  # same light background as the matplotlib figures
