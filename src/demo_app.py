@@ -50,6 +50,8 @@ LEGEND_LABELS = {
     "flagged point": "alerte",
 }
 JOB_STATUSES = {"pending": "En attente", "running": "En cours"}
+TOTO_SAMPLES_TUNED = 256  # number of Toto samples chosen in step 3.8
+FA = "False alarms / series"  # column of the results tables
 
 
 @st.cache_data
@@ -74,6 +76,11 @@ def load_cache():
 def fr(x, digits=1):
     """A number written the French way: 2.5 -> "2,5"."""
     return f"{x:.{digits}f}".replace(".", ",")
+
+
+def pct(x):
+    """A share written as a French percentage: 0.8213 -> "82 %" (non-breaking space)."""
+    return f"{100 * x:.0f} %"
 
 
 def api_is_up():
@@ -237,6 +244,41 @@ def render_live_tab(api_up):
         show_figure(fig)
 
 
+# --- Results tab ---
+
+def method_name(detector):
+    """French name of a detector of results/eval_test.csv."""
+    if detector.startswith("Tuned Toto"):
+        return "Toto"
+    if "default" in detector:
+        return "Méthode classique (réglage par défaut)"
+    return "Méthode classique (réglée sur les fausses alertes de Toto)"
+
+
+def render_results_tab():
+    # Equal false alarms, on the validation set: tuned Toto, and the baseline k with the closest false alarms
+    samples = load_csv("tuning_toto_samples.csv")
+    toto = samples[samples["Samples"] == TOTO_SAMPLES_TUNED].iloc[0]
+    baseline_grid = load_csv("tuning_baseline_fine.csv")
+    baseline = baseline_grid.loc[(baseline_grid[FA] - toto[FA]).abs().idxmin()]
+    st.subheader(f"À nombre de fausses alertes égal ({fr(toto[FA])} par série), Toto détecte "
+                 f"{pct(toto['Recall'])} des incidents, contre {pct(baseline['Recall'])} pour la méthode classique.")
+
+    st.image(str(RESULTS / "recall_vs_false_alarms.png"), width=900)
+    st.caption("Horizontalement : les fausses alertes par série. Verticalement : la part des incidents détectés. "
+               "Chaque point est un réglage : plus la courbe est haute, meilleure est la méthode.")
+
+    final = load_csv("eval_test.csv")
+    table = pd.DataFrame({
+        "Méthode": final["Detector"].map(method_name),
+        "Incidents détectés": final["Recall"].map(pct),
+        "Alertes justes": final["Precision"].map(pct),
+        "Fausses alertes par série": final[FA].map(fr),
+    })
+    st.dataframe(table, hide_index=True)
+    st.caption("Réglages choisis sur 100 séries, résultats vérifiés sur 100 autres séries jamais vues.")
+
+
 # --- Page ---
 
 st.set_page_config(page_title="Détection d'incidents avec Toto", layout="wide")
@@ -254,6 +296,8 @@ with st.sidebar:
 live_tab, results_tab, inside_tab = st.tabs(["Détection en direct", "Résultats sur 200 séries", "Sous le capot"])
 with live_tab:
     render_live_tab(api_up)
+with results_tab:
+    render_results_tab()
 
 st.divider()
 st.caption("Données : dataset public BOOM (Datadog). Modèle : Toto, open source (Datadog AI Research).")
