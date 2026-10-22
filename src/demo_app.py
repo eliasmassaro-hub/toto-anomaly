@@ -5,17 +5,51 @@ on a real metric. It calls the API like a real client; if the API cannot be reac
 precomputed results of results/demo_cache.json (offline mode), so the demo never crashes.
 """
 
+import json
 import os
+import time
 
+import matplotlib
+
+matplotlib.use("Agg")  # no window: figures are only rendered into the page
+import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import requests
 import streamlit as st
 
-from data import load_series
-from plot_data import RESULTS
+from data import CONTEXT, HORIZON, inject_spikes, load_series, split_history_future
+from plot_data import BLUE, GREY, RESULTS, SURFACE, ZOOM
+from plot_detectors import draw
 
 API_URL = os.environ.get("API_URL", "http://localhost:8000")
 HEALTH_TIMEOUT_S = 1
+REQUEST_TIMEOUT_S = 5  # per HTTP request
+POLL_INTERVAL_S = 0.2
+JOB_TIMEOUT_S = 30  # beyond this, the page falls back to the cache
+CACHE_PATH = RESULTS / "demo_cache.json"  # written by src/demo_precompute.py
+
+# Demo series: index -> (displayed name, explanation, history points shown). The first one is selected
+# by default. Series 42 shows 450 points so that the previous hourly bump (~360 points earlier) is visible.
+DEMO_SERIES = {
+    42: ("Tâche planifiée toutes les heures", "Une bosse revient environ toutes les heures : c'est normal.", 450),
+    0: ("Trafic cyclique", "Un cycle régulier, avec des pics naturels.", 200),
+    3: ("Changement de niveau", "La métrique change de niveau juste avant la fenêtre analysée.", 200),
+    7: ("Sauts réguliers", "Des sauts courts et réguliers, difficiles à prévoir à la minute près.", 200),
+}
+# API method -> (displayed name, color, chart title); colors are the same as in the interview slides
+METHODS = {
+    "baseline": ("Méthode classique", "#B34A12", "Méthode classique : zone normale fixe"),
+    "toto": ("Toto", "#2F5FD0", "Toto : zone normale prévue point par point"),
+}
+# draw() writes English legend labels: they are replaced with the page vocabulary
+LEGEND_LABELS = {
+    "forecast interval": "zone normale prévue",
+    "series": "métrique",
+    "injected spike": "incident simulé",
+    "flagged point": "alerte",
+}
+JOB_STATUSES = {"pending": "En attente", "running": "En cours"}
 
 
 @st.cache_data
@@ -31,6 +65,17 @@ def load_csv(name):
     return pd.read_csv(RESULTS / name)
 
 
+@st.cache_data
+def load_cache():
+    """Precomputed results of the demo series, used in offline mode."""
+    return json.loads(CACHE_PATH.read_text())
+
+
+def fr(x, digits=1):
+    """A number written the French way: 2.5 -> "2,5"."""
+    return f"{x:.{digits}f}".replace(".", ",")
+
+
 def api_is_up():
     """True if GET /health answers within HEALTH_TIMEOUT_S."""
     try:
@@ -38,6 +83,161 @@ def api_is_up():
     except requests.RequestException:
         return False
 
+
+def demo_series(index):
+    """History, future with spikes and spike positions of a demo series (same spikes as the figures)."""
+    values, _ = load_data()
+    history, future = split_history_future(values[index])
+    spiked, positions = inject_spikes(future, history, seed=0)
+    return history, spiked, positions
+
+
+# --- Live detection tab ---
+
+def run_with_api(index, history, spiked, status_lines):
+    """Creates a baseline job and a toto job, then polls both until done, like src/client.py.
+
+    status_lines: one st.empty() per method, updated live with the job status.
+    Returns {method: {"low", "high", "anomalies", "seconds"}}, or None if anything goes wrong
+    (network error, failed job, more than JOB_TIMEOUT_S): the page then uses the cache.
+    """
+    _, ids = load_data()
+    series = [{"id": str(ids[index]), "history": history.tolist(), "recent": spiked.tolist()}]
+    try:
+        start = time.perf_counter()
+        jobs = {}
+        for method in METHODS:
+            response = requests.post(f"{API_URL}/v1/detection-jobs", json={"method": method, "series": series},
+                                     timeout=REQUEST_TIMEOUT_S)
+            response.raise_for_status()
+            jobs[method] = response.json()["job_id"]
+
+        results = {}
+        while len(results) < len(jobs):
+            for method, job_id in jobs.items():
+                if method in results:
+                    continue
+                response = requests.get(f"{API_URL}/v1/detection-jobs/{job_id}", timeout=REQUEST_TIMEOUT_S)
+                response.raise_for_status()
+                job = response.json()
+                if job["status"] == "failed":
+                    return None
+                if job["status"] == "done":
+                    seconds = time.perf_counter() - start
+                    results[method] = {**job["results"][0], "seconds": seconds}
+                    text = f"Terminé en {fr(seconds)} s"
+                else:
+                    text = JOB_STATUSES.get(job["status"], job["status"])
+                status_lines[method].markdown(f"**{METHODS[method][0]}** : {text}")
+            if len(results) < len(jobs):
+                if time.perf_counter() - start > JOB_TIMEOUT_S:
+                    return None
+                time.sleep(POLL_INTERVAL_S)
+        return results
+    except Exception:  # any problem with the API (stopped, unreachable, unexpected answer): use the cache
+        return None
+
+
+def detect(index, api_up):
+    """Runs the detection of a demo series, through the API if possible, otherwise from the cache."""
+    results = None
+    if api_up:
+        history, spiked, _ = demo_series(index)
+        with st.status("Envoi de la série à l'API…", expanded=True) as status:
+            status_lines = {method: st.empty() for method in METHODS}
+            for method, line in status_lines.items():
+                line.markdown(f"**{METHODS[method][0]}** : envoi…")
+            results = run_with_api(index, history, spiked, status_lines)
+            label = "Détection terminée" if results else "L'API ne répond plus : résultats précalculés"
+            status.update(label=label, state="complete", expanded=results is not None)
+    if results is None:
+        cached = load_cache()[str(index)]
+        return {"index": index, "source": "cache", "results": {method: cached[method] for method in METHODS}}
+    return {"index": index, "source": "api", "results": results}
+
+
+def plot_series(series, positions, title, shown, color=GREY, low=None, high=None, anomalies=()):
+    """A demo chart drawn with draw() of plot_detectors.py, with French labels and bigger text.
+
+    shown: number of history points shown before the analyzed window (draw() shows ZOOM of them).
+    Without low and high, only the metric and the simulated incidents are shown.
+    Returns the figure, the number of incidents found and the number of false alarms.
+    """
+    fig, ax = plt.subplots(figsize=(11, 3.4), facecolor=SURFACE)
+    show_interval = low is not None
+    if not show_interval:  # nothing to fill: the interval and the alerts are left out of the legend below
+        low = high = np.full(HORIZON, np.nan)
+    anomalies = np.asarray(anomalies, dtype=int)
+    hits, false_alarms = draw(ax, series, positions, np.asarray(low), np.asarray(high), anomalies, color, title)
+
+    start = CONTEXT - shown
+    if shown > ZOOM:  # draw() starts the line ZOOM points before the window: the earlier part is added here
+        ax.plot(np.arange(start, CONTEXT - ZOOM + 1), series[start:CONTEXT - ZOOM + 1], color=BLUE, lw=1.2)
+    ax.set_xlim(start, len(series) - 1)
+
+    ax.set_title(title, color=GREY, fontsize=13, loc="left")
+    ax.set_ylabel("valeur", color=GREY, fontsize=10)
+    ax.set_xlabel("temps", color=GREY, fontsize=10)
+    ax.tick_params(labelsize=9)
+    # Above the shaded future area, so that it never hides a spike
+    ax.text(CONTEXT + HORIZON / 2, 1.01, "fenêtre analysée", transform=ax.get_xaxis_transform(),
+            ha="center", va="bottom", fontsize=10, color=GREY)
+    handles, labels = ax.get_legend_handles_labels()
+    kept = [(h, LEGEND_LABELS.get(lab, lab)) for h, lab in zip(handles, labels)
+            if show_interval or lab not in ("forecast interval", "flagged point")]
+    ax.legend([h for h, _ in kept], [lab for _, lab in kept], loc="upper left", fontsize=10, frameon=False)
+    fig.tight_layout()
+    return fig, hits, false_alarms
+
+
+def show_figure(fig):
+    st.pyplot(fig)
+    plt.close(fig)  # free the memory of the figure
+
+
+def show_detection(index, detection):
+    """The two charts (baseline then Toto), each with its two counters."""
+    history, spiked, positions = demo_series(index)
+    series = np.concatenate([history, spiked])
+    if detection["source"] == "cache":
+        st.caption("Mode hors ligne : résultats précalculés")
+    else:
+        times = " ; ".join(f"{METHODS[m][0]} : {fr(r['seconds'])} s" for m, r in detection["results"].items())
+        st.caption(f"Résultats calculés en direct par l'API ({times}).")
+
+    for method, (_, color, title) in METHODS.items():
+        result = detection["results"][method]
+        fig, hits, false_alarms = plot_series(series, positions, title, DEMO_SERIES[index][2], color,
+                                              result["low"], result["high"], result["anomalies"])
+        chart_col, counters_col = st.columns([4, 1], vertical_alignment="center")
+        with chart_col:
+            show_figure(fig)
+        with counters_col:
+            st.metric("Incidents retrouvés", f"{hits} / {len(positions)}")
+            st.metric("Fausses alertes", false_alarms)
+
+
+def render_live_tab(api_up):
+    names = {name: index for index, (name, _, _) in DEMO_SERIES.items()}
+    name = st.selectbox("Métrique", list(names))
+    index = names[name]
+    st.markdown(DEMO_SERIES[index][1])
+
+    if st.button("Lancer la détection", type="primary"):
+        # Kept in the session: the last result stays on screen until the next launch
+        st.session_state["detection"] = detect(index, api_up)
+
+    detection = st.session_state.get("detection")
+    if detection is not None and detection["index"] == index:
+        show_detection(index, detection)
+    else:  # before any detection: the metric with its simulated incidents only
+        history, spiked, positions = demo_series(index)
+        fig, _, _ = plot_series(np.concatenate([history, spiked]), positions,
+                                f"La métrique, avec {len(positions)} incidents simulés", DEMO_SERIES[index][2])
+        show_figure(fig)
+
+
+# --- Page ---
 
 st.set_page_config(page_title="Détection d'incidents avec Toto", layout="wide")
 st.title("Détecter les incidents sur des métriques")
@@ -52,6 +252,8 @@ with st.sidebar:
         st.info("Mode hors ligne : résultats précalculés")
 
 live_tab, results_tab, inside_tab = st.tabs(["Détection en direct", "Résultats sur 200 séries", "Sous le capot"])
+with live_tab:
+    render_live_tab(api_up)
 
 st.divider()
 st.caption("Données : dataset public BOOM (Datadog). Modèle : Toto, open source (Datadog AI Research).")
