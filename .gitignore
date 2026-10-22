@@ -14,6 +14,9 @@ venv/
 # Données téléchargées (BOOM), régénérables avec src/data.py
 data/
 
+# Sorties brutes de Locust, résumées dans results/loadtest.csv
+loadtest/out/
+
 # Divers
 .DS_Store
 .vscode/
