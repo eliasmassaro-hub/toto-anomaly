@@ -1,6 +1,7 @@
 """Étape 4 : API de détection d'anomalies."""
 
 import asyncio
+import os
 import uuid
 from contextlib import asynccontextmanager
 
@@ -11,9 +12,11 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from detectors import BaselineDetector, TotoDetector
 from schemas import JobRequest
-from worker import worker_loop
+from worker import BATCH_SIZE, MAX_WAIT_MS, worker_loop
 
-TOTO_SAMPLES = 256  # réglages retenus à l'étape 3 bis
+# Réglages retenus à l'étape 3 bis. Le test de charge utilise TOTO_SAMPLES=32 pour qu'un batch
+# de 16 séries tienne en un appel au modèle (16 × 32 = 512 tirages, voir README)
+TOTO_SAMPLES = int(os.environ.get("TOTO_SAMPLES", "256"))
 TOTO_LEVEL = 0.99
 DETECTORS: dict = {}
 
@@ -34,7 +37,7 @@ async def lifespan(app: FastAPI):
     DETECTORS["baseline"] = BaselineDetector(k=3)
     DETECTORS["toto"] = TotoDetector(num_samples=TOTO_SAMPLES, level=TOTO_LEVEL)
     worker_task = asyncio.create_task(worker_loop(QUEUE, JOBS, DETECTORS))
-    print("Prêt.")
+    print(f"Prêt (BATCH_SIZE={BATCH_SIZE}, MAX_WAIT_MS={MAX_WAIT_MS:g}, TOTO_SAMPLES={TOTO_SAMPLES}).")
     yield  # le serveur tourne ici, jusqu'à Ctrl+C
     # --- Arrêt du serveur ---
     worker_task.cancel()

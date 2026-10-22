@@ -115,7 +115,7 @@ Ce format sert aussi de champ `error` à un job `failed` : le client lit toutes 
 ## Limites connues
 
 - **Jobs stockés en mémoire** : perdus si le serveur redémarre, et impossibles à partager entre plusieurs serveurs (il faudrait Redis ou une base de données).
-- **Un seul worker** : les jobs sont traités un par un.
+- **Un seul worker** : il traite les jobs par batchs (`BATCH_SIZE` jobs au plus, ou ceux arrivés en `MAX_WAIT_MS`) ; un batch qui échoue fait passer tous ses jobs à `failed`.
 - **Pas de nettoyage** : les jobs terminés restent en mémoire indéfiniment (il faudrait une durée de vie, ou TTL).
 - **Pas d'idempotence** : si le client renvoie la même requête (après une coupure réseau, par exemple), deux jobs sont créés.
 - **Pas d'authentification** ni de limite par client (rate limiting).

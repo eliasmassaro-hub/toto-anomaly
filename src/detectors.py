@@ -1,6 +1,7 @@
 """Étape 2 : détecteurs d'anomalies (méthode simple et Toto).
 
-Interface commune : predict_interval(history) -> (low, high), deux tableaux de HORIZON points.
+Interface commune : predict_interval(history) -> (low, high), deux tableaux de HORIZON points,
+et predict_interval_batch(histories) pour plusieurs séries d'un coup (utilisé par le worker de l'API).
 Un point du futur hors de [low, high] est une anomalie (voir find_anomalies).
 """
 
@@ -34,6 +35,12 @@ class BaselineDetector:
         low = np.full(HORIZON, median - self.k * scale)
         high = np.full(HORIZON, median + self.k * scale)
         return low, high
+
+    def predict_interval_batch(self, histories):
+        """Même interface que TotoDetector : low et high de forme (n, HORIZON). Le calcul est instantané,
+        une boucle suffit."""
+        intervals = [self.predict_interval(history) for history in histories]
+        return np.array([low for low, _ in intervals]), np.array([high for _, high in intervals])
 
 
 def find_anomalies(future, low, high):
