@@ -27,6 +27,7 @@ import streamlit as st
 from data import CONTEXT, HORIZON, inject_spikes, load_series, split_history_future
 from plot_data import GREY, RESULTS, SURFACE
 from plot_detectors import draw
+from worker import BATCH_SIZE, MAX_WAIT_MS
 
 API_URL = os.environ.get("API_URL", "http://localhost:8000")
 HEALTH_TIMEOUT_S = 1
@@ -64,8 +65,9 @@ LEGEND_LABELS = {
 TOTO_SAMPLES_TUNED = 256  # number of Toto samples chosen in step 3.8
 FA = "False alarms / series"  # column of the results tables
 LOADTEST_USERS = 32  # simulated users of the load test (step 5.3)
+LOADTEST_SAMPLES = 32  # Toto samples used in the load test (TOTO_SAMPLES=32, see README)
 
-# Order-of-magnitude assumptions of the "Sous le capot" tab, deliberately simple
+# Order-of-magnitude assumptions of the "Architecture & scalability" tab, deliberately simple
 FLEET_SERIES = 1_000_000  # series to monitor
 CHECK_INTERVAL_S = 5 * 60  # each series is checked every 5 minutes
 CASCADE_DISCARDED = 0.95  # share of series that the baseline rules out before Toto
@@ -81,12 +83,12 @@ digraph {
     node [shape=box, style="rounded,filled", fillcolor="#f4f4f1", color="#c3c2b7", fontname="Helvetica",
           fontsize=10, margin="0.08,0.04", height=0.3];
     edge [color="#52514e", arrowsize=0.8];
-    client [label="Client\\n(page de démo)"];
+    client [label="Client\\n(demo page)"];
     api [label="API\\n(FastAPI)"];
-    queue [label="File d'attente"];
-    worker [label="Worker\\n(traitement par lots)"];
+    queue [label="Bounded queue"];
+    worker [label="Worker\\n(batched inference)"];
     toto [label="Toto", fillcolor="#e3e9fa", color="#2F5FD0"];
-    storage [label="Stockage des jobs\\n(statuts et résultats)", shape=cylinder];
+    storage [label="Job storage\\n(status and results)", shape=cylinder];
     client -> api -> queue -> worker -> toto;
     {rank=same; queue; storage;}
     api -> storage [dir=both];
@@ -129,6 +131,12 @@ def approx(x, significant=2):
     digits = significant - 1 - int(np.floor(np.log10(abs(x))))  # decimals to keep (negative: round to tens...)
     rounded = round(x, digits)
     return f"{rounded:,.0f}" if digits <= 0 else num(rounded, digits)
+
+
+def big_number(value, text):
+    """A big number with its explanation under it (as a label, a long text would be cut)."""
+    st.metric(text, value, label_visibility="collapsed")
+    st.markdown(text)
 
 
 def api_is_up():
@@ -221,8 +229,7 @@ def render_overview_tab():
     ]
     for col, (value, text) in zip(st.columns(3), figures):
         with col:
-            st.metric(text, value, label_visibility="collapsed")
-            st.markdown(text)  # under the number rather than as its label, so that it can wrap
+            big_number(value, text)
 
 
 # --- Live detection tab ---
@@ -408,74 +415,90 @@ def render_live_tab(api_up):
 # --- Results tab ---
 
 def method_name(detector):
-    """French name of a detector of results/eval_test.csv."""
+    """Displayed name of a detector of results/eval_test.csv."""
     if detector.startswith("Tuned Toto"):
         return "Toto"
     if "default" in detector:
-        return "Méthode classique (réglage par défaut)"
-    return "Méthode classique (réglée sur les fausses alertes de Toto)"
+        return "Classic method (default setting)"
+    return "Classic method (tuned to Toto's false-alarm rate)"
 
 
 def render_results_tab():
-    # Equal false alarms, on the validation set: tuned Toto, and the baseline k with the closest false alarms
-    samples = load_csv("tuning_toto_samples.csv")
-    toto = samples[samples["Samples"] == TOTO_SAMPLES_TUNED].iloc[0]
-    baseline_grid = load_csv("tuning_baseline_fine.csv")
-    baseline = baseline_grid.loc[(baseline_grid[FA] - toto[FA]).abs().idxmin()]
-    st.subheader(f"À nombre de fausses alertes égal ({num(toto[FA])} par série), Toto détecte "
-                 f"{pct(toto['Recall'])} des incidents, contre {pct(baseline['Recall'])} pour la méthode classique.")
+    fa, toto_recall, classic_recall = equal_false_alarms()
+    st.subheader(f"At an equal false-alarm rate ({num(fa)} per series), Toto catches {pct(toto_recall)} of "
+                 f"incidents, vs. {pct(classic_recall)} for the classic method.")
 
     st.image(str(RESULTS / "recall_vs_false_alarms.png"), width=900)
-    st.caption("Horizontalement : les fausses alertes par série. Verticalement : la part des incidents détectés. "
-               "Chaque point est un réglage : plus la courbe est haute, meilleure est la méthode.")
+    st.caption("Horizontal axis: false alarms per series. Vertical axis: share of incidents caught. Each point is "
+               "a setting: the higher the curve, the better the method.")
 
     final = load_csv("eval_test.csv")
     table = pd.DataFrame({
-        "Méthode": final["Detector"].map(method_name),
-        "Incidents détectés": final["Recall"].map(pct),
-        "Alertes justes": final["Precision"].map(pct),
-        "Fausses alertes par série": final[FA].map(num),
+        "Method": final["Detector"].map(method_name),
+        "Incidents caught": final["Recall"].map(pct),
+        "Alert precision": final["Precision"].map(pct),
+        "False alarms per series": final[FA].map(num),
     })
     st.table(table, hide_index=True)  # static table: text wraps, no scrollbar or toolbar on screen
-    st.caption("Réglages choisis sur 100 séries, résultats vérifiés sur 100 autres séries jamais vues.")
+    n_series = len(load_data()[0])
+    st.caption(f"Settings tuned on {n_series // 2} series, results verified on {n_series - n_series // 2} "
+               "held-out series.")
 
 
-# --- Under the hood tab ---
+# --- Architecture & scalability tab ---
 
-def render_inside_tab():
-    st.subheader("L'architecture")
+def render_architecture_tab():
+    toto_ms, classic_ms = compute_times()
+    st.subheader("Cost")
+    big_number(f"≈{approx(toto_ms / classic_ms, 1)}×",
+               f"more compute per series than the classic method ({toto_ms / 1000:.1f} s vs {classic_ms:.2f} ms "
+               "on CPU)")
+
+    st.subheader("Serving architecture")
     st.graphviz_chart(ARCHITECTURE_DOT)
-
-    final = load_csv("eval_test.csv")
-    toto_ms = final.loc[final["Detector"].str.startswith("Tuned Toto"), "ms / series"].item()
-    baseline_ms = final.loc[final["Detector"].str.contains("default"), "ms / series"].item()
-    loadtest = load_csv("loadtest.csv").set_index("Batch")["Series / s"]
-    batched = loadtest[loadtest.index.max()]  # series per second with the biggest batch (16)
-
-    st.subheader("Les chiffres")
-    figures = {
-        "Coût de Toto par rapport à la méthode classique": f"≈ {approx(toto_ms / baseline_ms)}×",
-        "Gain de débit grâce aux lots": f"+{pct(batched / loadtest[1] - 1)}",
-        f"Débit sous {LOADTEST_USERS} clients simultanés": f"{num(batched)} séries/s",
-    }
-    # Bottom alignment: the numbers stay on one line even when a label wraps
-    for col, (label, value) in zip(st.columns(3, vertical_alignment="bottom"), figures.items()):
-        with col:
-            st.markdown(label)  # above the number rather than as its label, so that it can wrap
-            st.metric(label, value, label_visibility="collapsed")
-
-    st.subheader("Et à grande échelle ?")
-    needed = FLEET_SERIES / CHECK_INTERVAL_S  # series per second
-    machines = needed / batched
     st.markdown(
-        f"{FLEET_SERIES / 1e6:g} million de séries toutes les {CHECK_INTERVAL_S // 60} minutes "
-        f"= environ {approx(needed)} séries/s  \n"
-        f"→ environ {approx(machines)} machines CPU à ce débit  \n"
-        f"→ environ {approx(machines * (1 - CASCADE_DISCARDED))} avec une cascade où la méthode classique "
-        f"écarte {pct(CASCADE_DISCARDED)} des séries."
+        "- **Asynchronous API**: requests are accepted immediately (202 + job id); clients poll for the result.\n"
+        "- **Bounded queue**: when it is full, the API rejects new jobs with 429 instead of collapsing.\n"
+        "- Inference runs in a **separate thread**, so the API stays responsive while the model computes.\n"
+        f"- **Batching**: up to {BATCH_SIZE} jobs, or whatever arrives within {MAX_WAIT_MS:g} ms, per model call."
     )
-    st.caption("Ordre de grandeur, avec des hypothèses volontairement simples. Le débit vient du test de charge, "
-               "avec une version allégée de Toto, sur un ordinateur portable.")
+
+    st.subheader("Load test")
+    loadtest = load_test()
+    single, batched = loadtest.index.min(), loadtest.index.max()
+    st.markdown(f"{LOADTEST_USERS} concurrent clients (Locust), Toto with {LOADTEST_SAMPLES} samples, on a laptop CPU.")
+    st.table(pd.DataFrame({
+        "Batch size": loadtest.index,
+        "Throughput": [f"{x:.2f} series/s" for x in loadtest["Series / s"]],
+        "p95 latency (end to end)": [f"{x:g} s" for x in loadtest["p95 latency (s)"]],
+        "Failures": loadtest["Failures"],
+    }), hide_index=True)
+    gain = loadtest.loc[batched, "Series / s"] / loadtest.loc[single, "Series / s"] - 1
+    st.markdown(f"Batching gain: **+{pct(gain)}** throughput with batches of {batched} instead of {single}.")
+
+    samples = load_csv("tuning_toto_samples.csv").set_index("Samples")
+    load_ms = 1000 / loadtest.loc[batched, "Series / s"]  # time per series under load
+    st.markdown(f"The model is the bottleneck, not the API: throughput matches Toto's compute time per series "
+                f"(≈{load_ms:.0f} ms per series under load, vs. ≈{samples.loc[LOADTEST_SAMPLES, 'ms / series']:.0f} "
+                f"ms of model compute alone).")
+    speedup = samples.loc[TOTO_SAMPLES_TUNED, "ms / series"] / samples.loc[LOADTEST_SAMPLES, "ms / series"]
+    st.markdown(f"On CPU, {LOADTEST_SAMPLES} samples instead of {TOTO_SAMPLES_TUNED}: about {speedup:.0f}× faster "
+                f"per series, F1 from {samples.loc[TOTO_SAMPLES_TUNED, 'F1']:.2f} to "
+                f"{samples.loc[LOADTEST_SAMPLES, 'F1']:.2f}. On GPU, keep {TOTO_SAMPLES_TUNED} samples with large "
+                "batches.")
+
+    st.subheader("At Datadog scale (back-of-the-envelope)")
+    needed = FLEET_SERIES / CHECK_INTERVAL_S  # series per second
+    machines = needed / loadtest.loc[batched, "Series / s"]
+    st.markdown(
+        f"{FLEET_SERIES / 1e6:g}M series every {CHECK_INTERVAL_S // 60} min ≈ {approx(needed)} series/s  \n"
+        f"→ ≈{approx(machines)} CPU machines at this throughput  \n"
+        f"→ ≈{approx(machines * (1 - CASCADE_DISCARDED))} with a cascade where the classic method filters out "
+        f"{pct(CASCADE_DISCARDED)} of series; fewer on GPU"
+    )
+    st.caption("Simplified assumptions, order of magnitude only.")
+    st.markdown("What would change in production: a distributed queue (Kafka) instead of the in-memory queue, "
+                "series partitioned by id across stateless workers, job results in Redis or a database.")
 
 
 # --- Page ---
@@ -510,7 +533,7 @@ with live_tab:
 with results_tab:
     render_results_tab()
 with architecture_tab:
-    render_inside_tab()
+    render_architecture_tab()
 
 st.divider()
 st.caption("Data: public BOOM dataset (Datadog). Model: Toto, open source (Datadog AI Research).")
