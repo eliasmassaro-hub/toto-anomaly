@@ -109,21 +109,21 @@ def load_cache():
     return json.loads(CACHE_PATH.read_text())
 
 
-def fr(x, digits=1):
-    """A number written the French way: 2.5 -> "2,5"."""
-    return f"{x:.{digits}f}".replace(".", ",")
+def num(x, digits=1):
+    """A number with a fixed number of decimals: 2.25 -> "2.2"."""
+    return f"{x:.{digits}f}"
 
 
 def pct(x):
-    """A share written as a French percentage: 0.8213 -> "82 %" (non-breaking space)."""
-    return f"{100 * x:.0f} %"
+    """A share written as a percentage: 0.8213 -> "82%"."""
+    return f"{100 * x:.0f}%"
 
 
-def approx(x):
-    """x rounded to 2 significant digits, with French thousands separators: 72505 -> "73 000"."""
-    digits = 1 - int(np.floor(np.log10(abs(x))))  # decimals to keep (negative: round to tens, hundreds...)
+def approx(x, significant=2):
+    """x rounded to a few significant digits, with thousands separators: 72505 -> "73,000" (or "70,000")."""
+    digits = significant - 1 - int(np.floor(np.log10(abs(x))))  # decimals to keep (negative: round to tens...)
     rounded = round(x, digits)
-    return f"{rounded:,.0f}".replace(",", " ") if digits <= 0 else fr(rounded, digits)
+    return f"{rounded:,.0f}" if digits <= 0 else num(rounded, digits)
 
 
 def api_is_up():
@@ -140,6 +140,84 @@ def demo_series(index):
     history, future = split_history_future(values[index])
     spiked, positions = inject_spikes(future, history, seed=0)
     return history, spiked, positions
+
+
+# --- Figures read from results/ ---
+
+def equal_false_alarms():
+    """Validation set, at an equal false-alarm rate: false alarms per series, Toto recall, classic recall.
+
+    Tuned Toto (results/tuning_toto_samples.csv) against the classic method's k whose false alarms
+    are the closest (results/tuning_baseline_fine.csv).
+    """
+    samples = load_csv("tuning_toto_samples.csv")
+    toto = samples[samples["Samples"] == TOTO_SAMPLES_TUNED].iloc[0]
+    grid = load_csv("tuning_baseline_fine.csv")
+    classic = grid.loc[(grid[FA] - toto[FA]).abs().idxmin()]
+    return toto[FA], toto["Recall"], classic["Recall"]
+
+
+def compute_times():
+    """Mean computation time per series on the test set, in ms: (Toto, classic method)."""
+    final = load_csv("eval_test.csv")
+    toto_ms = final.loc[final["Detector"].str.startswith("Tuned Toto"), "ms / series"].item()
+    classic_ms = final.loc[final["Detector"].str.contains("default"), "ms / series"].item()
+    return toto_ms, classic_ms
+
+
+def load_test():
+    """results/loadtest.csv, one row per batch size."""
+    return load_csv("loadtest.csv").set_index("Batch")
+
+
+# --- Overview tab ---
+
+def render_overview_tab():
+    values, _ = load_data()
+    n_series = len(values)
+    n_spikes = len(demo_series(next(iter(DEMO_SERIES)))[2])
+
+    st.subheader("The problem")
+    st.markdown("When an incident happens, for example a faulty deployment that makes an API's error rate spike, "
+                "the on-call engineer must be alerted within minutes, without false alarms that would teach them "
+                "to ignore alerts.")
+    st.subheader("The scale constraint")
+    st.markdown("Datadog monitors millions of time series. Training one model per series is not an option. "
+                "Toto is a single pretrained model that works on any series, with no retraining (151M parameters, "
+                "pretrained on about 2.36 trillion data points, 43% of them Datadog internal metrics).")
+
+    st.subheader("What I built")
+    steps = [
+        ("Data", f"{n_series} real Datadog metrics (public BOOM dataset)"),
+        ("Incidents", f"{n_spikes} simulated spikes per series"),
+        ("Evaluation", f"classic statistical method vs. Toto, tuned on {n_series // 2} series, "
+                       f"tested on {n_series - n_series // 2} others"),
+        ("Serving", "asynchronous API with a bounded queue and batched inference"),
+        ("Load test", f"{LOADTEST_USERS} concurrent clients (Locust)"),
+    ]
+    quality_col, scale_col = st.columns([3, 2])
+    for group_col, label, first, last in ((quality_col, "Quality: does it detect well?", 0, 3),
+                                          (scale_col, "Scale: does it hold the load?", 3, 5)):
+        with group_col.container(border=True):
+            st.markdown(f"**{label}**")
+            for col, number in zip(st.columns(last - first), range(first, last)):
+                name, text = steps[number]
+                col.markdown(f"**{number + 1}. {name}**  \n{text}")
+
+    st.subheader("Key figures")
+    _, toto_recall, classic_recall = equal_false_alarms()
+    toto_ms, classic_ms = compute_times()
+    loadtest = load_test()
+    batched = loadtest.loc[loadtest.index.max(), "Series / s"]  # biggest batch
+    figures = [
+        (f"{toto_recall / classic_recall:.0f}×", "more incidents caught at an equal false-alarm rate"),
+        (f"≈{approx(toto_ms / classic_ms, 1)}×", "more compute per series than the classic method"),
+        (f"≈{approx(batched, 1)} series/s", f"on a laptop CPU, {int(loadtest['Failures'].sum())} failures"),
+    ]
+    for col, (value, text) in zip(st.columns(3), figures):
+        with col:
+            st.metric(text, value, label_visibility="collapsed")
+            st.markdown(text)  # under the number rather than as its label, so that it can wrap
 
 
 # --- Live detection tab ---
@@ -175,7 +253,7 @@ def run_with_api(index, history, spiked, status_lines):
                 if job["status"] == "done":
                     seconds = time.perf_counter() - start
                     results[method] = {**job["results"][0], "seconds": seconds}
-                    text = f"Terminé en {fr(seconds)} s"
+                    text = f"Terminé en {num(seconds)} s"
                 else:
                     text = JOB_STATUSES.get(job["status"], job["status"])
                 status_lines[method].markdown(f"**{METHODS[method][0]}** : {text}")
@@ -253,7 +331,7 @@ def show_detection(index, detection):
     if detection["source"] == "cache":
         st.caption("Mode hors ligne : résultats précalculés")
     else:
-        times = " ; ".join(f"{METHODS[m][0]} : {fr(r['seconds'])} s" for m, r in detection["results"].items())
+        times = " ; ".join(f"{METHODS[m][0]} : {num(r['seconds'])} s" for m, r in detection["results"].items())
         st.caption(f"Résultats calculés en direct par l'API ({times}).")
 
     for method, (_, color, title) in METHODS.items():
@@ -310,7 +388,7 @@ def render_results_tab():
     toto = samples[samples["Samples"] == TOTO_SAMPLES_TUNED].iloc[0]
     baseline_grid = load_csv("tuning_baseline_fine.csv")
     baseline = baseline_grid.loc[(baseline_grid[FA] - toto[FA]).abs().idxmin()]
-    st.subheader(f"À nombre de fausses alertes égal ({fr(toto[FA])} par série), Toto détecte "
+    st.subheader(f"À nombre de fausses alertes égal ({num(toto[FA])} par série), Toto détecte "
                  f"{pct(toto['Recall'])} des incidents, contre {pct(baseline['Recall'])} pour la méthode classique.")
 
     st.image(str(RESULTS / "recall_vs_false_alarms.png"), width=900)
@@ -322,7 +400,7 @@ def render_results_tab():
         "Méthode": final["Detector"].map(method_name),
         "Incidents détectés": final["Recall"].map(pct),
         "Alertes justes": final["Precision"].map(pct),
-        "Fausses alertes par série": final[FA].map(fr),
+        "Fausses alertes par série": final[FA].map(num),
     })
     st.table(table, hide_index=True)  # static table: text wraps, no scrollbar or toolbar on screen
     st.caption("Réglages choisis sur 100 séries, résultats vérifiés sur 100 autres séries jamais vues.")
@@ -344,7 +422,7 @@ def render_inside_tab():
     figures = {
         "Coût de Toto par rapport à la méthode classique": f"≈ {approx(toto_ms / baseline_ms)}×",
         "Gain de débit grâce aux lots": f"+{pct(batched / loadtest[1] - 1)}",
-        f"Débit sous {LOADTEST_USERS} clients simultanés": f"{fr(batched)} séries/s",
+        f"Débit sous {LOADTEST_USERS} clients simultanés": f"{num(batched)} séries/s",
     }
     # Bottom alignment: the numbers stay on one line even when a label wraps
     for col, (label, value) in zip(st.columns(3, vertical_alignment="bottom"), figures.items()):
@@ -368,10 +446,11 @@ def render_inside_tab():
 
 # --- Page ---
 
-st.set_page_config(page_title="Détection d'incidents avec Toto", layout="wide")
-st.title("Détecter les incidents sur des métriques")
-st.markdown("Une vraie métrique, trois incidents simulés : la méthode classique et Toto doivent les retrouver, "
-            "sans fausses alertes.")
+st.set_page_config(page_title="Incident detection with Toto", layout="wide")
+st.title("Detecting incidents across millions of metrics")
+st.markdown("An end-to-end study of Toto, Datadog AI Research's open-source forecasting model: detection quality, "
+            "serving architecture and cost at scale.")
+st.caption("Elias Massaro · MVA (ENS Paris-Saclay) · Mines Nancy")
 
 api_status = st.sidebar.empty()  # a placeholder, updated if the API stops during a detection
 
@@ -379,22 +458,25 @@ api_status = st.sidebar.empty()  # a placeholder, updated if the API stops durin
 def show_api_status(up):
     with api_status:
         if up:
-            st.success("API connectée")
+            st.success("API connected")
         else:
-            st.info("Mode hors ligne : résultats précalculés")
+            st.info("Offline mode: precomputed results")
 
 
 api_up = api_is_up()
 show_api_status(api_up)
 
-live_tab, results_tab, inside_tab = st.tabs(["Détection en direct", "Résultats sur 200 séries", "Sous le capot"])
+overview_tab, live_tab, results_tab, architecture_tab, takeaways_tab = st.tabs(
+    ["Overview", "Live detection", "Results", "Architecture & scalability", "Takeaways"])
+with overview_tab:
+    render_overview_tab()
 with live_tab:
     if render_live_tab(api_up):
         show_api_status(False)
 with results_tab:
     render_results_tab()
-with inside_tab:
+with architecture_tab:
     render_inside_tab()
 
 st.divider()
-st.caption("Données : dataset public BOOM (Datadog). Modèle : Toto, open source (Datadog AI Research).")
+st.caption("Data: public BOOM dataset (Datadog). Model: Toto, open source (Datadog AI Research).")
