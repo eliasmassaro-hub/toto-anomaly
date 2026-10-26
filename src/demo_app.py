@@ -1,14 +1,17 @@
-"""Step D2: demo page for the interview (Streamlit).
+"""Steps D2 and D3: the interview presentation, as a Streamlit page that replaces the slides.
 
-The page shows a non-technical audience how the baseline method and Toto find simulated incidents
-on a real metric. It calls the API like a real client; if the API cannot be reached, it uses the
-precomputed results of results/demo_cache.json (offline mode), so the demo never crashes.
+Five tabs, in the order of the talk: Overview, Live detection, Results, Architecture & scalability
+and Takeaways. Every figure is read from results/*.csv; only the assumptions of the order-of-magnitude
+estimate are constants. The Live detection tab calls the API like a real client; if the API cannot
+be reached, it uses the precomputed results of results/demo_cache.json (offline mode), so the demo
+never crashes.
 
 How to run it, from the repository root:
 1. terminal 1: uvicorn api:app --app-dir src   (without --reload), then wait for "Ready"
 2. terminal 2: streamlit run src/demo_app.py, then open http://localhost:8501
+3. before the talk, click "Run detection on all 4 metrics" once: Toto is then warmed up.
 Without step 1, the page works in offline mode. If results/demo_cache.json is missing,
-rebuild it with python src/demo_precompute.py.
+rebuild it with python src/demo_precompute.py (about 30 s).
 """
 
 import json
@@ -208,14 +211,14 @@ def render_overview_tab():
         ("Serving", "asynchronous API with a bounded queue and batched inference"),
         ("Load test", f"{LOADTEST_USERS} concurrent clients (Locust)"),
     ]
-    quality_col, scale_col = st.columns([3, 2])
-    for group_col, label, first, last in ((quality_col, "Quality: does it detect well?", 0, 3),
-                                          (scale_col, "Scale: does it hold the load?", 3, 5)):
-        with group_col.container(border=True):
+    # Group labels on one row, then the 5 steps on one row: flat columns stay readable at 125% zoom,
+    # where columns nested inside bordered boxes became too narrow for long words
+    for col, label in zip(st.columns([3, 2]), ("Quality: does it detect well?", "Scale: does it hold the load?")):
+        with col:
             st.markdown(f"**{label}**")
-            for col, number in zip(st.columns(last - first), range(first, last)):
-                name, text = steps[number]
-                col.markdown(f"**{number + 1}. {name}**  \n{text}")
+            st.divider()
+    for col, (number, (name, text)) in zip(st.columns(len(steps)), enumerate(steps, 1)):
+        col.markdown(f"**{number}. {name}**  \n{text}")
 
     st.subheader("Key figures")
     _, toto_recall, classic_recall = equal_false_alarms()
@@ -303,7 +306,8 @@ def plot_series(series, positions, color=GREY, low=None, high=None, anomalies=()
     Without low and high, only the metric and the simulated incidents are shown.
     Returns the figure, the number of incidents caught and the number of false alarms.
     """
-    fig, ax = plt.subplots(figsize=(5, 2.6), facecolor=SURFACE)
+    # Narrow figure: shrunk to half the page width, it keeps its text readable at 125% zoom
+    fig, ax = plt.subplots(figsize=(4.6, 2.8), facecolor=SURFACE)
     show_interval = low is not None
     if not show_interval:  # nothing to fill: the range and the alerts are left out of the legend below
         low = high = np.full(HORIZON, np.nan)
@@ -311,20 +315,20 @@ def plot_series(series, positions, color=GREY, low=None, high=None, anomalies=()
     caught, false_alarms = draw(ax, series, positions, np.asarray(low), np.asarray(high), anomalies, color, "")
 
     ax.set_title("", loc="left")  # draw() writes its title on the left
-    ax.set_ylabel("value", color=GREY, fontsize=9)
+    ax.set_ylabel("value", color=GREY, fontsize=9.5)
     ax.set_xticklabels([])  # time step numbers mean nothing to the audience
-    ax.tick_params(labelsize=8)
+    ax.tick_params(labelsize=8.5)
     bottom, top = ax.get_ylim()
     ax.set_ylim(bottom, top + 0.12 * (top - bottom))  # room for the circles of the highest spikes
     # Above the shaded future area, so that it never hides a spike
     ax.text(CONTEXT + HORIZON / 2, 1.01, "analyzed window", transform=ax.get_xaxis_transform(),
-            ha="center", va="bottom", fontsize=9, color=GREY)
+            ha="center", va="bottom", fontsize=9.5, color=GREY)
     handles, labels = ax.get_legend_handles_labels()
     kept = [(h, LEGEND_LABELS.get(lab, lab)) for h, lab in zip(handles, labels)
             if show_interval or lab not in ("forecast interval", "flagged point")]
     # Under the chart, so that it never hides the curve
     ax.legend([h for h, _ in kept], [lab for _, lab in kept], loc="upper center", bbox_to_anchor=(0.5, -0.12),
-              ncol=len(kept), fontsize=8.5, frameon=False, handlelength=1.5, columnspacing=1.2)
+              ncol=len(kept), fontsize=9.5, frameon=False, handlelength=1.2, columnspacing=0.9, handletextpad=0.4)
     fig.tight_layout()
     return fig, caught, false_alarms
 
