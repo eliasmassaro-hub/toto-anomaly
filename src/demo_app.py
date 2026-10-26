@@ -501,6 +501,25 @@ def render_architecture_tab():
                 "series partitioned by id across stateless workers, job results in Redis or a database.")
 
 
+# --- Takeaways tab ---
+
+REPOSITORY = "github.com/eliasmassaro-hub/toto-anomaly"
+TAKEAWAYS = [
+    ("Evaluate honestly", "compare methods at an equal false-alarm rate; tune and test on different series."),
+    ("Think about cost from day one", "at scale, a model is only useful if it can be served, and the right "
+                                      "settings depend on the hardware."),
+    ("Next steps", "measure the cascade end to end, move inference to GPU, test more realistic incidents "
+                   "(multi-point, level shifts)."),
+    ("Code and results", f"[{REPOSITORY}](https://{REPOSITORY})"),
+]
+
+
+def render_takeaways_tab():
+    for title, text in TAKEAWAYS:
+        with st.container(border=True):
+            st.markdown(f"**{title}:** {text}")
+
+
 # --- Page ---
 
 st.set_page_config(page_title="Incident detection with Toto", layout="wide")
@@ -534,6 +553,8 @@ with results_tab:
     render_results_tab()
 with architecture_tab:
     render_architecture_tab()
+with takeaways_tab:
+    render_takeaways_tab()
 
 st.divider()
 st.caption("Data: public BOOM dataset (Datadog). Model: Toto, open source (Datadog AI Research).")
