@@ -1,4 +1,4 @@
-"""Step D2.2: precomputes the demo results, used by the demo page when the API is not reachable.
+"""Step D3.3: precomputes the demo results, used by the demo page when the API is not reachable.
 
 Usage: python src/demo_precompute.py
 Writes results/demo_cache.json: for each demo series, the injected spike positions and, for each
@@ -15,29 +15,25 @@ from data import inject_spikes, load_series, split_history_future
 from detectors import BaselineDetector, TotoDetector, find_anomalies
 from plot_data import RESULTS
 
-DEMO_INDICES = [42, 0, 3, 7]  # same series as the demo page
+DEMO_INDICES = [12, 4, 38, 173]  # same series as the demo page (chosen in step D3.1)
 CACHE_PATH = RESULTS / "demo_cache.json"
-
-
-def make_detector(method):
-    """A fresh detector, built right after seeding: same random state as plot_detectors.py,
-    so the cached results match the figures results/series_<index>_detectors.png."""
-    torch.manual_seed(0)
-    if method == "baseline":
-        return BaselineDetector(k=3)
-    return TotoDetector(num_samples=256, level=0.99)  # same settings as the API
 
 
 def main():
     values, ids, _ = load_series()
+    detectors = {
+        "baseline": BaselineDetector(k=3),
+        "toto": TotoDetector(num_samples=256, level=0.99),  # same settings as the API
+    }
 
     cache = {}
     for index in DEMO_INDICES:
         history, future = split_history_future(values[index])
-        spiked, positions = inject_spikes(future, history, seed=0)  # same spikes as the figures
+        spiked, positions = inject_spikes(future, history, seed=0)  # same spikes as the demo page
         entry = {"id": str(ids[index]), "positions": positions.tolist()}
-        for method in ("baseline", "toto"):
-            low, high = make_detector(method).predict_interval(history)
+        for method, detector in detectors.items():
+            torch.manual_seed(0)  # same random state as src/demo_select_series.py: same numbers as its table
+            low, high = detector.predict_interval(history)
             entry[method] = {
                 "low": low.tolist(),
                 "high": high.tolist(),
